@@ -3,12 +3,12 @@ package api
 import (
 	"net/http"
 
-	"github.com/anmho/create-go-service/internal/notes"
+	"github.com/anmho/create-go-service/internal/posts"
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 )
 
-func New(noteService *notes.Service) *chi.Mux {
+func New(noteService *posts.Service) *chi.Mux {
 	r := chi.NewMux()
 
 	r.Use(middleware.Logger)

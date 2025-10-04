@@ -4,14 +4,14 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/anmho/create-go-service/internal/notes"
+	"github.com/anmho/create-go-service/internal/posts"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 func registerRoutes(
 	r *chi.Mux,
-	noteService *notes.Service,
+	noteService *posts.Service,
 ) {
 
 	r.Post("/notes", createNote(noteService))
@@ -29,7 +29,7 @@ type CreateNoteRequest struct {
 	IsPrivate bool   `json:"is_private"`
 }
 
-func createNote(noteService *notes.Service) http.HandlerFunc {
+func createNote(noteService *posts.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		params, err := Body[CreateNoteRequest](r.Body)
 		if err != nil {

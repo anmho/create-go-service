@@ -1,20 +1,18 @@
-package notes
+package posts
 
 import (
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
 )
 
-func NewNote(
+func NewPost(
 	id uuid.UUID,
 	author uuid.UUID,
 	title string,
 	content string,
-	createdAt time.Time) *Note {
-	return &Note{
+	createdAt time.Time) *Post {
+	return &Post{
 		ID:        id,
 		Author:    author,
 		Title:     title,
@@ -25,7 +23,7 @@ func NewNote(
 	}
 }
 
-type Note struct {
+type Post struct {
 	ID        uuid.UUID `json:"id" dynamodbav:"id"`
 	Author    uuid.UUID `json:"author" dynamodbav:"author"`
 	Title     string    `json:"title" dynamodbav:"title"`
@@ -36,13 +34,4 @@ type Note struct {
 }
 
 // ToDynamoDBItem converts a Note to DynamoDB item format
-func NoteToDynamoItem(note *Note) (map[string]types.AttributeValue, error) {
-	return attributevalue.MarshalMap(note)
-}
 
-// NoteFromDynamoItem converts DynamoDB item to Note
-func NoteFromDynamoItem(item map[string]types.AttributeValue) (*Note, error) {
-	var note Note
-	err := attributevalue.UnmarshalMap(item, &note)
-	return &note, err
-}

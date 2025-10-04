@@ -9,14 +9,14 @@ import (
 
 	"github.com/anmho/create-go-service/internal/api"
 	"github.com/anmho/create-go-service/internal/database"
-	"github.com/anmho/create-go-service/internal/notes"
+	"github.com/anmho/create-go-service/internal/posts"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
 
-func main() {
-	
+const port = "8080"
 
+func main() {
 	ctx := context.Background()
 
 	dynamoClient, err := database.NewDynamoDB(ctx,
@@ -35,11 +35,11 @@ func main() {
 	}
 	_ = results
 
-	noteService := notes.NewService(dynamoClient, tableName)
+	postTable := posts.NewTable(dynamoClient)
+	postTable.CreateIfNotExists(ctx)
+	noteService := posts.NewService(postTable)
 
 	s := api.New(noteService)
-	port := "8080"
-
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: s,

@@ -1,4 +1,4 @@
-package notes
+package posts
 
 type CreateNoteRequest struct {
 	Title     string `json:"title" validate:"required"`

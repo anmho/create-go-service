@@ -28,12 +28,7 @@ func WithEndpoint(endpoint string) Option {
 	}
 }
 
-func sum(name string, nums ...int) {
-
-}
-
 func NewDynamoDB(ctx context.Context, opts ...Option) (*dynamodb.Client, error) {
-	sum("s", []int{1, 2, 3}...)
 	o := &options{}
 	for _, opt := range opts {
 		opt(o)
