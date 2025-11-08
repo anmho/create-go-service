@@ -2,12 +2,14 @@ package posts
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
@@ -17,15 +19,29 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+const (
+	// dynamoDBContainerPort is the internal container port that DynamoDB Local listens on
+	// testcontainers automatically maps this to a random host port to avoid contention
+	dynamoDBContainerPort = "8000/tcp"
+)
+
 func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 	ctx := context.Background()
 
 	// Start DynamoDB Local container (official AWS tool - lighter and faster than LocalStack)
+	// testcontainers automatically assigns random host ports when ExposedPorts is specified
+	// This avoids port contention when running tests in parallel
 	req := testcontainers.ContainerRequest{
 		Image:        "amazon/dynamodb-local:latest",
-		ExposedPorts: []string{"8000/tcp"},
+		ExposedPorts: []string{dynamoDBContainerPort},
 		Cmd:          []string{"-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"},
-		WaitingFor:   wait.ForHTTP("/").WithPath("/").WithStartupTimeout(10*time.Second),
+		// Wait for container to be ready - DynamoDB Local starts quickly but may need time to initialize
+		// Use a generous timeout to account for slower systems, Docker daemon delays, network issues, etc.
+		// Wait for the port to be listening, which indicates DynamoDB Local is ready
+		// Use the constant instead of hardcoding the port
+		WaitingFor: wait.ForListeningPort(dynamoDBContainerPort).
+			WithStartupTimeout(60 * time.Second).
+			WithPollInterval(100 * time.Millisecond),
 	}
 	
 	dynamoContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -34,9 +50,12 @@ func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 	})
 	require.NoError(t, err)
 
-	// Get endpoint
+	// Get endpoint with random port assignment (testcontainers automatically assigns random host port)
+	// This avoids port contention when running tests in parallel
+	// Endpoint() returns "host:port" format, so we need to prepend "http://" for DynamoDB Local
 	endpoint, err := dynamoContainer.Endpoint(ctx, "")
 	require.NoError(t, err)
+	endpointURL := fmt.Sprintf("http://%s", endpoint)
 
 	// Create DynamoDB client
 	cfg, err := config.LoadDefaultConfig(ctx,
@@ -45,7 +64,7 @@ func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
 			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 				return aws.Endpoint{
-					URL:           endpoint,
+					URL:           endpointURL,
 					SigningRegion: "us-east-1",
 				}, nil
 			})),
@@ -64,11 +83,11 @@ func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 				AttributeType: types.ScalarAttributeTypeS,
 			},
 			{
-				AttributeName: aws.String("PostID"),
-				AttributeType: types.ScalarAttributeTypeS,
+				AttributeName: aws.String("CreatedAt"),
+				AttributeType: types.ScalarAttributeTypeN,
 			},
 			{
-				AttributeName: aws.String("Slug"),
+				AttributeName: aws.String("PostID"),
 				AttributeType: types.ScalarAttributeTypeS,
 			},
 		},
@@ -78,16 +97,16 @@ func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 				KeyType:       types.KeyTypeHash,
 			},
 			{
-				AttributeName: aws.String("PostID"),
+				AttributeName: aws.String("CreatedAt"),
 				KeyType:       types.KeyTypeRange,
 			},
 		},
 		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
 			{
-				IndexName: aws.String("SlugIndex"),
+				IndexName: aws.String("PostIDIndex"),
 				KeySchema: []types.KeySchemaElement{
 					{
-						AttributeName: aws.String("Slug"),
+						AttributeName: aws.String("PostID"),
 						KeyType:       types.KeyTypeHash,
 					},
 				},
@@ -118,19 +137,78 @@ func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
 	return client, tableName, cleanup
 }
 
+func TestPostStorageModel(t *testing.T) {
+	t.Parallel()
+
+	post := &Post{
+		ID:        uuid.MustParse("123e4567-e89b-12d3-a456-426614174000"),
+		UserID:    uuid.MustParse("223e4567-e89b-12d3-a456-426614174001"),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC),
+	}
+
+	// Convert Post to PostStorageModel
+	storage := PostToStorage(post)
+
+	// Marshal PostStorageModel directly to DynamoDB item using dynamodbav tags
+	item, err := attributevalue.MarshalMap(storage)
+	require.NoError(t, err)
+	require.NotNil(t, item)
+
+	// Verify UUID fields are stored as strings
+	userIDVal, ok := item["UserID"].(*types.AttributeValueMemberS)
+	require.True(t, ok, "UserID should be a string")
+	assert.Equal(t, post.UserID.String(), userIDVal.Value)
+
+	postIDVal, ok := item["PostID"].(*types.AttributeValueMemberS)
+	require.True(t, ok, "PostID should be a string")
+	assert.Equal(t, post.ID.String(), postIDVal.Value)
+
+	// Verify CreatedAt is stored as epoch millis (number)
+	createdAtVal, ok := item["CreatedAt"].(*types.AttributeValueMemberN)
+	require.True(t, ok, "CreatedAt should be a number")
+	assert.Equal(t, fmt.Sprintf("%d", post.CreatedAt.UnixMilli()), createdAtVal.Value)
+
+	// Verify UpdatedAt is stored as epoch millis (number)
+	updatedAtVal, ok := item["UpdatedAt"].(*types.AttributeValueMemberN)
+	require.True(t, ok, "UpdatedAt should be a number")
+	assert.Equal(t, fmt.Sprintf("%d", post.UpdatedAt.UnixMilli()), updatedAtVal.Value)
+
+	// Verify string fields
+	titleVal, ok := item["Title"].(*types.AttributeValueMemberS)
+	require.True(t, ok, "Title should be a string")
+	assert.Equal(t, post.Title, titleVal.Value)
+
+	contentVal, ok := item["Content"].(*types.AttributeValueMemberS)
+	require.True(t, ok, "Content should be a string")
+	assert.Equal(t, post.Content, contentVal.Value)
+
+	// Test round-trip: unmarshal back to PostStorageModel
+	var unmarshaled PostStorageModel
+	err = attributevalue.UnmarshalMap(item, &unmarshaled)
+	require.NoError(t, err)
+	assert.Equal(t, storage.UserID, unmarshaled.UserID)
+	assert.Equal(t, storage.PostID, unmarshaled.PostID)
+	assert.Equal(t, storage.CreatedAt, unmarshaled.CreatedAt)
+	assert.Equal(t, storage.Title, unmarshaled.Title)
+	assert.Equal(t, storage.Content, unmarshaled.Content)
+	assert.Equal(t, storage.UpdatedAt, unmarshaled.UpdatedAt)
+}
+
 func TestPostTable_PutPost(t *testing.T) {
 	t.Parallel()
 	client, tableName, cleanup := setupTestDynamoDB(t)
 	defer cleanup()
 
 	ctx := context.Background()
-	table, err := NewDynamoDBTable(ctx, client, tableName)
+	table, err := NewPostTable(ctx, client, tableName)
 	require.NoError(t, err)
 
 	post := &Post{
 		ID:        uuid.New(),
 		UserID:    uuid.New(),
-		Slug:      uuid.New(),
 		Title:     "Test Post",
 		Content:   "Test Content",
 		CreatedAt: time.Now(),
@@ -140,25 +218,24 @@ func TestPostTable_PutPost(t *testing.T) {
 	err = table.PutPost(ctx, post)
 	assert.NoError(t, err)
 
-	// Verify post was inserted by getting it by slug
-	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	// Verify post was inserted by getting it by ID
+	retrieved, err := table.GetPostByID(ctx, post.ID)
 	require.NoError(t, err)
 	assert.Equal(t, post.ID, retrieved.ID)
 }
 
-func TestPostTable_GetPostBySlug(t *testing.T) {
+func TestPostTable_GetPostByID(t *testing.T) {
 	t.Parallel()
 	client, tableName, cleanup := setupTestDynamoDB(t)
 	defer cleanup()
 
 	ctx := context.Background()
-	table, err := NewDynamoDBTable(ctx, client, tableName)
+	table, err := NewPostTable(ctx, client, tableName)
 	require.NoError(t, err)
 
 	post := &Post{
 		ID:        uuid.New(),
 		UserID:    uuid.New(),
-		Slug:      uuid.New(),
 		Title:     "Test Post",
 		Content:   "Test Content",
 		CreatedAt: time.Now(),
@@ -168,17 +245,16 @@ func TestPostTable_GetPostBySlug(t *testing.T) {
 	err = table.PutPost(ctx, post)
 	require.NoError(t, err)
 
-	// Get post by slug
-	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	// Get post by ID
+	retrieved, err := table.GetPostByID(ctx, post.ID)
 	require.NoError(t, err)
 	assert.Equal(t, post.ID, retrieved.ID)
 	assert.Equal(t, post.UserID, retrieved.UserID)
-	assert.Equal(t, post.Slug, retrieved.Slug)
 	assert.Equal(t, post.Title, retrieved.Title)
 	assert.Equal(t, post.Content, retrieved.Content)
 
 	// Test not found
-	_, err = table.GetPostBySlug(ctx, uuid.New())
+	_, err = table.GetPostByID(ctx, uuid.New())
 	assert.ErrorIs(t, err, ErrPostNotFound)
 }
 
@@ -188,7 +264,7 @@ func TestPostTable_ListPostsByUserID(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	table, err := NewDynamoDBTable(ctx, client, tableName)
+	table, err := NewPostTable(ctx, client, tableName)
 	require.NoError(t, err)
 
 	userID := uuid.New()
@@ -198,7 +274,6 @@ func TestPostTable_ListPostsByUserID(t *testing.T) {
 	post1 := &Post{
 		ID:        uuid.New(),
 		UserID:    userID,
-		Slug:      uuid.New(),
 		Title:     "Post 1",
 		Content:   "Content 1",
 		CreatedAt: time.Now().Add(-2 * time.Hour),
@@ -207,7 +282,6 @@ func TestPostTable_ListPostsByUserID(t *testing.T) {
 	post2 := &Post{
 		ID:        uuid.New(),
 		UserID:    userID,
-		Slug:      uuid.New(),
 		Title:     "Post 2",
 		Content:   "Content 2",
 		CreatedAt: time.Now().Add(-1 * time.Hour),
@@ -217,7 +291,6 @@ func TestPostTable_ListPostsByUserID(t *testing.T) {
 	post3 := &Post{
 		ID:        uuid.New(),
 		UserID:    otherUserID,
-		Slug:      uuid.New(),
 		Title:     "Post 3",
 		Content:   "Content 3",
 		CreatedAt: time.Now(),
@@ -249,13 +322,12 @@ func TestPostTable_DeletePost(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	table, err := NewDynamoDBTable(ctx, client, tableName)
+	table, err := NewPostTable(ctx, client, tableName)
 	require.NoError(t, err)
 
 	post := &Post{
 		ID:        uuid.New(),
 		UserID:    uuid.New(),
-		Slug:      uuid.New(),
 		Title:     "Test Post",
 		Content:   "Test Content",
 		CreatedAt: time.Now(),
@@ -266,11 +338,11 @@ func TestPostTable_DeletePost(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete post
-	err = table.DeletePost(ctx, post.Slug)
+	err = table.DeletePost(ctx, post.ID)
 	assert.NoError(t, err)
 
 	// Verify post was deleted
-	_, err = table.GetPostBySlug(ctx, post.Slug)
+	_, err = table.GetPostByID(ctx, post.ID)
 	assert.ErrorIs(t, err, ErrPostNotFound)
 }
 
@@ -280,13 +352,12 @@ func TestPostTable_UpdatePost(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	table, err := NewDynamoDBTable(ctx, client, tableName)
+	table, err := NewPostTable(ctx, client, tableName)
 	require.NoError(t, err)
 
 	post := &Post{
 		ID:        uuid.New(),
 		UserID:    uuid.New(),
-		Slug:      uuid.New(),
 		Title:     "Original Title",
 		Content:   "Original Content",
 		CreatedAt: time.Now(),
@@ -305,7 +376,7 @@ func TestPostTable_UpdatePost(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify post was updated
-	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	retrieved, err := table.GetPostByID(ctx, post.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Updated Title", retrieved.Title)
 	assert.Equal(t, "Updated Content", retrieved.Content)
