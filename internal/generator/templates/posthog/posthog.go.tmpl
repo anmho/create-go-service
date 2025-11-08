@@ -1,0 +1,100 @@
+package posthog
+
+import (
+	"context"
+	"log/slog"
+
+	posthog "github.com/posthog/posthog-go"
+)
+
+// Client is an interface for PostHog event tracking
+// This allows for easy mocking in tests
+type Client interface {
+	Capture(ctx context.Context, distinctID string, event string, properties map[string]interface{}) error
+	Identify(ctx context.Context, distinctID string, properties map[string]interface{}) error
+	Close() error
+}
+
+// clientImpl wraps the PostHog client for event tracking
+type clientImpl struct {
+	client posthog.Client
+	config *Config
+	enabled bool
+}
+
+// Config holds PostHog configuration
+type Config struct {
+	APIKey string
+	Host   string
+}
+
+// New creates a new PostHog client
+func New(ctx context.Context, cfg *Config) (Client, error) {
+	if cfg.APIKey == "" {
+		slog.Warn("PostHog API key not provided, PostHog tracking will be disabled")
+		return &clientImpl{
+			client:  nil,
+			config:  cfg,
+			enabled: false,
+		}, nil
+	}
+
+	host := cfg.Host
+	if host == "" {
+		host = "https://app.posthog.com"
+	}
+
+	client, err := posthog.NewWithConfig(
+		cfg.APIKey,
+		posthog.Config{
+			Endpoint: host,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("PostHog client initialized", "host", host)
+
+	return &clientImpl{
+		client:  client,
+		config:  cfg,
+		enabled: true,
+	}, nil
+}
+
+// Capture sends an event to PostHog
+func (c *clientImpl) Capture(ctx context.Context, distinctID string, event string, properties map[string]interface{}) error {
+	if !c.enabled || c.client == nil {
+		// Silently skip if client is not enabled
+		return nil
+	}
+
+	return c.client.Enqueue(posthog.Capture{
+		DistinctId: distinctID,
+		Event:      event,
+		Properties: properties,
+	})
+}
+
+// Identify sends an identify event to PostHog
+func (c *clientImpl) Identify(ctx context.Context, distinctID string, properties map[string]interface{}) error {
+	if !c.enabled || c.client == nil {
+		// Silently skip if client is not enabled
+		return nil
+	}
+
+	return c.client.Enqueue(posthog.Identify{
+		DistinctId: distinctID,
+		Properties: properties,
+	})
+}
+
+// Close shuts down the PostHog client
+func (c *clientImpl) Close() error {
+	if !c.enabled || c.client == nil {
+		return nil
+	}
+	return c.client.Close()
+}
+

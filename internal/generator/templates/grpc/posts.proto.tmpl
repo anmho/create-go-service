@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package posts.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "{{.ModulePath}}/protos/gen/posts/v1;postsv1";
+
+// PostService provides CRUD operations for posts
+service PostService {
+  // CreatePost creates a new post
+  rpc CreatePost(CreatePostRequest) returns (CreatePostResponse) {}
+  
+  // GetPost retrieves a post by its slug
+  rpc GetPost(GetPostRequest) returns (GetPostResponse) {}
+  
+  // ListPosts retrieves all posts for a user
+  rpc ListPosts(ListPostsRequest) returns (ListPostsResponse) {}
+  
+  // UpdatePost updates an existing post
+  rpc UpdatePost(UpdatePostRequest) returns (UpdatePostResponse) {}
+  
+  // DeletePost deletes a post by its slug
+  rpc DeletePost(DeletePostRequest) returns (DeletePostResponse) {}
+}
+
+// Post represents a blog post or content item
+message Post {
+  // Unique identifier for the post
+  string id = 1;
+  
+  // User ID who owns this post
+  string user_id = 2;
+  
+  // Public slug for URL routing (UUID)
+  string slug = 3;
+  
+  // Post title (max 200 characters)
+  string title = 4;
+  
+  // Post content (max 10000 characters)
+  string content = 5;
+  
+  // Timestamp when the post was created
+  google.protobuf.Timestamp created_at = 6;
+  
+  // Timestamp when the post was last updated
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// CreatePostRequest contains data for creating a new post
+message CreatePostRequest {
+  // User ID who owns this post (required)
+  string user_id = 1;
+  
+  // Post title (required, max 200 characters)
+  string title = 2;
+  
+  // Post content (optional, max 10000 characters)
+  string content = 3;
+}
+
+// CreatePostResponse returns the newly created post
+message CreatePostResponse {
+  Post post = 1;
+}
+
+// GetPostRequest identifies a post by its slug
+message GetPostRequest {
+  // Post slug (UUID, required)
+  string slug = 1;
+}
+
+// GetPostResponse returns the requested post
+message GetPostResponse {
+  Post post = 1;
+}
+
+// ListPostsRequest filters posts by user
+message ListPostsRequest {
+  // User ID to filter posts (required)
+  string user_id = 1;
+  
+  // Optional pagination token for next page
+  string page_token = 2;
+  
+  // Optional page size (default: 50, max: 100)
+  int32 page_size = 3;
+}
+
+// ListPostsResponse returns a list of posts
+message ListPostsResponse {
+  // List of posts
+  repeated Post posts = 1;
+  
+  // Token for fetching the next page (empty if no more pages)
+  string next_page_token = 2;
+}
+
+// UpdatePostRequest updates an existing post
+message UpdatePostRequest {
+  // Post slug to update (UUID, required)
+  string slug = 1;
+  
+  // New title (optional, max 200 characters)
+  optional string title = 2;
+  
+  // New content (optional, max 10000 characters)
+  optional string content = 3;
+}
+
+// UpdatePostResponse returns the updated post
+message UpdatePostResponse {
+  Post post = 1;
+}
+
+// DeletePostRequest identifies a post to delete
+message DeletePostRequest {
+  // Post slug to delete (UUID, required)
+  string slug = 1;
+}
+
+// DeletePostResponse confirms deletion
+message DeletePostResponse {
+  // Success message
+  string message = 1;
+}
+

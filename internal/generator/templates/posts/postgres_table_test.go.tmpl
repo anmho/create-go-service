@@ -1,0 +1,305 @@
+package posts
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
+	// Fail if Docker is not available
+	cmd := exec.Command("docker", "info")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Docker not available: %v. Tests require Docker to run.", err)
+	}
+
+	ctx := context.Background()
+
+	// Start PostgreSQL container
+	postgresContainer, err := postgres.RunContainer(ctx,
+		testcontainers.WithImage("postgres:15-alpine"),
+		postgres.WithDatabase("testdb"),
+		postgres.WithUsername("postgres"),
+		postgres.WithPassword("postgres"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).WithStartupTimeout(30*time.Second)),
+	)
+	require.NoError(t, err)
+
+	// Get connection string
+	connStr, err := postgresContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	// Create connection pool
+	pool, err := pgxpool.New(ctx, connStr)
+	require.NoError(t, err)
+
+	// Apply migrations from migrations directory (at project root)
+	// Find project root by going up from test file location
+	// Test file is at internal/posts/post_table_test.go, so go up 2 levels
+	_, testFile, _, _ := runtime.Caller(0)
+	projectRoot := filepath.Join(filepath.Dir(testFile), "..", "..")
+	migrationsDir := filepath.Join(projectRoot, "migrations")
+	entries, err := os.ReadDir(migrationsDir)
+	require.NoError(t, err, "failed to read migrations directory")
+
+	// Collect and sort migration files by name to apply in order
+	var migrationFiles []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") {
+			migrationFiles = append(migrationFiles, entry.Name())
+		}
+	}
+	require.NotEmpty(t, migrationFiles, "no migration files found in migrations directory")
+
+	// Sort migration files by name (e.g., 001_initial.up.sql, 002_add_index.up.sql)
+	sort.Strings(migrationFiles)
+
+	// Apply each migration file in order
+	for _, fileName := range migrationFiles {
+		migrationPath := filepath.Join(migrationsDir, fileName)
+		migrationSQL, err := os.ReadFile(migrationPath)
+		require.NoError(t, err, "failed to read migration file: %s", fileName)
+		
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		require.NoError(t, err, "failed to apply migration: %s", fileName)
+	}
+
+	// Cleanup function
+	cleanup := func() {
+		pool.Close()
+		require.NoError(t, postgresContainer.Terminate(ctx))
+	}
+
+	return pool, cleanup
+}
+
+func TestPostTable_PutPost(t *testing.T) {
+	t.Parallel()
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewPostTable(ctx, pool)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	assert.NoError(t, err)
+
+	// Verify post was inserted
+	var count int
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM posts WHERE id = $1", post.ID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestPostTable_GetPostBySlug(t *testing.T) {
+	t.Parallel()
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewPostTable(ctx, pool)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Get post by slug
+	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	require.NoError(t, err)
+	// Verify all fields are correctly scanned by pgx.CollectOneRow
+	assert.Equal(t, post.ID, retrieved.ID)
+	assert.Equal(t, post.UserID, retrieved.UserID)
+	assert.Equal(t, post.Slug, retrieved.Slug)
+	assert.Equal(t, post.Title, retrieved.Title)
+	assert.Equal(t, post.Content, retrieved.Content)
+	assert.WithinDuration(t, post.CreatedAt, retrieved.CreatedAt, time.Second)
+	assert.WithinDuration(t, post.UpdatedAt, retrieved.UpdatedAt, time.Second)
+
+	// Test not found
+	_, err = table.GetPostBySlug(ctx, uuid.New())
+	assert.ErrorIs(t, err, ErrPostNotFound)
+}
+
+func TestPostTable_ListPostsByUserID(t *testing.T) {
+	t.Parallel()
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewPostTable(ctx, pool)
+	require.NoError(t, err)
+
+	userID := uuid.New()
+	otherUserID := uuid.New()
+
+	// Create posts for user
+	post1 := &Post{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Slug:      uuid.New(),
+		Title:     "Post 1",
+		Content:   "Content 1",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	post2 := &Post{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Slug:      uuid.New(),
+		Title:     "Post 2",
+		Content:   "Content 2",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+	}
+	// Post for different user
+	post3 := &Post{
+		ID:        uuid.New(),
+		UserID:    otherUserID,
+		Slug:      uuid.New(),
+		Title:     "Post 3",
+		Content:   "Content 3",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post1)
+	require.NoError(t, err)
+	err = table.PutPost(ctx, post2)
+	require.NoError(t, err)
+	err = table.PutPost(ctx, post3)
+	require.NoError(t, err)
+
+	// List posts for user
+	posts, err := table.ListPostsByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.Len(t, posts, 2)
+	// Should be ordered by created_at DESC (newest first)
+	assert.Equal(t, post2.ID, posts[0].ID)
+	assert.Equal(t, post2.Title, posts[0].Title)
+	assert.Equal(t, post2.Content, posts[0].Content)
+	assert.Equal(t, post1.ID, posts[1].ID)
+	assert.Equal(t, post1.Title, posts[1].Title)
+	assert.Equal(t, post1.Content, posts[1].Content)
+
+	// List posts for other user
+	posts, err = table.ListPostsByUserID(ctx, otherUserID)
+	require.NoError(t, err)
+	assert.Len(t, posts, 1)
+	assert.Equal(t, post3.ID, posts[0].ID)
+	assert.Equal(t, post3.Title, posts[0].Title)
+	assert.Equal(t, post3.Content, posts[0].Content)
+}
+
+func TestPostTable_DeletePost(t *testing.T) {
+	t.Parallel()
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewPostTable(ctx, pool)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Delete post
+	err = table.DeletePost(ctx, post.Slug)
+	assert.NoError(t, err)
+
+	// Verify post was deleted
+	_, err = table.GetPostBySlug(ctx, post.Slug)
+	assert.ErrorIs(t, err, ErrPostNotFound)
+
+	// Test deleting non-existent post
+	err = table.DeletePost(ctx, uuid.New())
+	assert.ErrorIs(t, err, ErrPostNotFound)
+}
+
+func TestPostTable_UpdatePost(t *testing.T) {
+	t.Parallel()
+	pool, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewPostTable(ctx, pool)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Original Title",
+		Content:   "Original Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Update post
+	post.Title = "Updated Title"
+	post.Content = "Updated Content"
+	post.UpdatedAt = time.Now()
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Verify post was updated - check all fields
+	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, post.ID, retrieved.ID)
+	assert.Equal(t, post.UserID, retrieved.UserID)
+	assert.Equal(t, post.Slug, retrieved.Slug)
+	assert.Equal(t, "Updated Title", retrieved.Title)
+	assert.Equal(t, "Updated Content", retrieved.Content)
+	assert.WithinDuration(t, post.CreatedAt, retrieved.CreatedAt, time.Second)
+	assert.True(t, retrieved.UpdatedAt.After(post.CreatedAt))
+}

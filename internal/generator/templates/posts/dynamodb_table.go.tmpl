@@ -1,0 +1,215 @@
+package posts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
+)
+
+const (
+	TableName = "{{.ProjectName}}-posts"
+	SlugIndex = "SlugIndex"
+)
+
+// DynamoDBTable implements Repository for DynamoDB
+type DynamoDBTable struct {
+	client *dynamodb.Client
+}
+
+// CreateTableIfNotExists creates the DynamoDB table if it doesn't exist
+// This ensures the table schema is consistent between tests and production
+func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableName string) error {
+	// Check if table exists
+	_, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	})
+	if err == nil {
+		// Table exists, nothing to do
+		return nil
+	}
+
+	// Check if error is because table doesn't exist
+	var resourceNotFound *types.ResourceNotFoundException
+	if err != nil && !errors.As(err, &resourceNotFound) {
+		return fmt.Errorf("failed to check if table exists: %w", err)
+	}
+
+	// Create table
+	_, err = client.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(tableName),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{
+				AttributeName: aws.String("UserID"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+			{
+				AttributeName: aws.String("PostID"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+			{
+				AttributeName: aws.String("Slug"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{
+				AttributeName: aws.String("UserID"),
+				KeyType:       types.KeyTypeHash,
+			},
+			{
+				AttributeName: aws.String("PostID"),
+				KeyType:       types.KeyTypeRange,
+			},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("SlugIndex"),
+				KeySchema: []types.KeySchemaElement{
+					{
+						AttributeName: aws.String("Slug"),
+						KeyType:       types.KeyTypeHash,
+					},
+				},
+				Projection: &types.Projection{
+					ProjectionType: types.ProjectionTypeAll,
+				},
+			},
+		},
+		BillingMode: types.BillingModePayPerRequest,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create table: %w", err)
+	}
+
+	// Wait for table to be active
+	waiter := dynamodb.NewTableExistsWaiter(client)
+	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	}, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to wait for table to be active: %w", err)
+	}
+
+	return nil
+}
+
+// NewDynamoDBTable creates a new DynamoDB repository for posts
+// It creates the table if it doesn't exist to ensure consistency with tests
+func NewDynamoDBTable(ctx context.Context, client *dynamodb.Client, tableName string) (*DynamoDBTable, error) {
+	// Create table if it doesn't exist
+	if err := CreateTableIfNotExists(ctx, client, tableName); err != nil {
+		return nil, fmt.Errorf("failed to ensure table exists: %w", err)
+	}
+
+	return &DynamoDBTable{
+		client: client,
+	}, nil
+}
+
+// PutPost saves a post to DynamoDB
+func (t *DynamoDBTable) PutPost(ctx context.Context, post *Post) error {
+	item, err := attributevalue.MarshalMap(post)
+	if err != nil {
+		return fmt.Errorf("failed to marshal post: %w", err)
+	}
+
+	_, err = t.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(TableName),
+		Item:      item,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to put post: %w", err)
+	}
+
+	return nil
+}
+
+// GetPostBySlug retrieves a post by its slug using GSI
+func (t *DynamoDBTable) GetPostBySlug(ctx context.Context, slug uuid.UUID) (*Post, error) {
+	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(TableName),
+		IndexName:              aws.String(SlugIndex),
+		KeyConditionExpression: aws.String("Slug = :slug"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":slug": &types.AttributeValueMemberS{Value: slug.String()},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query post by slug: %w", err)
+	}
+
+	if len(result.Items) == 0 {
+		return nil, ErrPostNotFound
+	}
+
+	post, err := t.unmarshalPost(result.Items[0])
+	if err != nil {
+		return nil, err
+	}
+
+	return post, nil
+}
+
+// ListPostsByUserID retrieves all posts for a user
+func (t *DynamoDBTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID) ([]Post, error) {
+	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(TableName),
+		KeyConditionExpression: aws.String("UserID = :userID"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":userID": &types.AttributeValueMemberS{Value: userID.String()},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query posts: %w", err)
+	}
+
+	posts := make([]Post, 0, len(result.Items))
+	for _, item := range result.Items {
+		post, err := t.unmarshalPost(item)
+		if err != nil {
+			return nil, err
+		}
+		posts = append(posts, *post)
+	}
+
+	return posts, nil
+}
+
+// DeletePost removes a post from DynamoDB by slug
+func (t *DynamoDBTable) DeletePost(ctx context.Context, slug uuid.UUID) error {
+	// First, get the post to find its UserID and PostID (composite key)
+	post, err := t.GetPostBySlug(ctx, slug)
+	if err != nil {
+		return err
+	}
+
+	_, err = t.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(TableName),
+		Key: map[string]types.AttributeValue{
+			"UserID": &types.AttributeValueMemberS{Value: post.UserID.String()},
+			"PostID": &types.AttributeValueMemberS{Value: post.ID.String()},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete post: %w", err)
+	}
+
+	return nil
+}
+
+// unmarshalPost converts a DynamoDB item to a Post struct
+func (t *DynamoDBTable) unmarshalPost(item map[string]types.AttributeValue) (*Post, error) {
+	var post Post
+	if err := attributevalue.UnmarshalMap(item, &post); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
+	}
+	return &post, nil
+}
+

@@ -1,0 +1,141 @@
+package config
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/caarlos0/env/v10"
+	"gopkg.in/yaml.v3"
+)
+
+// Stage represents the deployment stage/environment
+type Stage string
+
+const (
+	StageLocal      Stage = "local"
+	StageDevelopment Stage = "development"
+	StageProduction Stage = "production"
+)
+
+// String returns the string representation of the stage
+func (s Stage) String() string {
+	return string(s)
+}
+
+// IsLocal returns true if the stage is local
+func (s Stage) IsLocal() bool {
+	return s == StageLocal
+}
+
+// IsProduction returns true if the stage is production
+func (s Stage) IsProduction() bool {
+	return s == StageProduction
+}
+
+type Config struct {
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+{{- if .HasAuth}}
+	Auth     AuthConfig     `yaml:"auth"`
+{{- end}}
+{{- if .HasMetrics}}
+	Metrics  MetricsConfig  `yaml:"metrics"`
+{{- end}}
+{{- if .HasPostHog}}
+	PostHog  PostHogConfig  `yaml:"posthog"`
+{{- end}}
+{{- if .HasPostgres}}
+	Secrets  SecretsConfig  `yaml:"-"`
+{{- end}}
+}
+
+type ServerConfig struct {
+	Port  string `yaml:"port"`
+	Stage Stage  `yaml:"stage"`
+}
+
+type DatabaseConfig struct {
+{{- if eq .Database "dynamodb"}}
+	AWSRegion   string `yaml:"aws_region"`
+	TableName   string `yaml:"table_name"`
+	EndpointURL string `yaml:"endpoint_url"` // Optional: for local DynamoDB (e.g., http://localhost:8000)
+{{- else if eq .Database "postgres"}}
+	URL string `yaml:"url"`
+{{- end}}
+}
+
+{{- if .HasAuth}}
+type AuthConfig struct {
+	TokenExpiry string `yaml:"token_expiry"`
+}
+{{- end}}
+
+{{- if .HasMetrics}}
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
+}
+{{- end}}
+
+{{- if .HasPostHog}}
+type PostHogConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Host    string `yaml:"host"`
+}
+{{- end}}
+
+{{- if .HasAuth}}
+type SecretsConfig struct {
+{{- if .HasPostgres}}
+	DatabaseURL string `env:"DATABASE_URL,required"`
+{{- end}}
+	JWTSecret   string `env:"JWT_SECRET,required"`
+{{- if .HasPostHog}}
+	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
+{{- end}}
+}
+{{- else if .HasPostgres}}
+type SecretsConfig struct {
+	DatabaseURL string `env:"DATABASE_URL,required"`
+{{- if .HasPostHog}}
+	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
+{{- end}}
+}
+{{- else if .HasPostHog}}
+type SecretsConfig struct {
+	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
+}
+{{- end}}
+
+// Load reads configuration from stage-specific YAML file and loads secrets from environment variables
+func Load() (*Config, error) {
+	cfg := &Config{}
+
+	// Determine stage from environment variable (only for selecting which YAML file to load)
+	stage := os.Getenv("STAGE")
+	if stage == "" {
+		stage = "local"
+	}
+
+	// Load from stage-specific YAML file
+	configPath := fmt.Sprintf("%s.yaml", stage)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		}
+		return nil, fmt.Errorf("config file %s not found. Please ensure the YAML config file exists for stage: %s", configPath, stage)
+	}
+
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+	}
+
+	// Load secrets from environment variables only (required)
+	if err := env.Parse(&cfg.Secrets); err != nil {
+		return nil, fmt.Errorf("failed to parse secrets from env: %w", err)
+	}
+
+	return cfg, nil
+}
+

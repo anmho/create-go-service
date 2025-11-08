@@ -1,0 +1,257 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"{{.ModulePath}}/internal/posts"
+	postsv1 "{{.ModulePath}}/protos/gen/posts/v1"
+	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1"
+)
+
+// PostServiceHandler implements the gRPC PostService
+type PostServiceHandler struct {
+	postsv1connect.UnimplementedPostServiceHandler
+	service *posts.Service
+}
+
+// NewPostServiceHandler creates a new gRPC handler for posts
+func NewPostServiceHandler(service *posts.Service) *PostServiceHandler {
+	return &PostServiceHandler{
+		service: service,
+	}
+}
+
+// CreatePost handles post creation requests
+func (h *PostServiceHandler) CreatePost(
+	ctx context.Context,
+	req *connect.Request[postsv1.CreatePostRequest],
+) (*connect.Response[postsv1.CreatePostResponse], error) {
+	// Validate request
+	if req.Msg.UserId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("user_id is required"))
+	}
+	if req.Msg.Title == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title is required"))
+	}
+	if len(req.Msg.Title) > 200 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title must be 200 characters or less"))
+	}
+	if len(req.Msg.Content) > 10000 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("content must be 10000 characters or less"))
+	}
+
+	// Parse user ID
+	userID, err := uuid.Parse(req.Msg.UserId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid user_id format"))
+	}
+
+	// Create post
+	post, err := h.service.CreatePost(ctx, userID, req.Msg.Title, req.Msg.Content)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to create post", "error", err, "user_id", userID)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to create post"))
+	}
+
+	// Convert to proto
+	protoPost := &postsv1.Post{
+		Id:        post.ID.String(),
+		UserId:    post.UserID.String(),
+		Slug:      post.Slug.String(),
+		Title:     post.Title,
+		Content:   post.Content,
+		CreatedAt: timestamppb.New(post.CreatedAt),
+		UpdatedAt: timestamppb.New(post.UpdatedAt),
+	}
+
+	return connect.NewResponse(&postsv1.CreatePostResponse{
+		Post: protoPost,
+	}), nil
+}
+
+// GetPost retrieves a post by slug
+func (h *PostServiceHandler) GetPost(
+	ctx context.Context,
+	req *connect.Request[postsv1.GetPostRequest],
+) (*connect.Response[postsv1.GetPostResponse], error) {
+	// Validate request
+	if req.Msg.Slug == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	}
+
+	// Parse slug
+	slug, err := uuid.Parse(req.Msg.Slug)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+	}
+
+	// Get post
+	post, err := h.service.GetPost(ctx, slug)
+	if err != nil {
+		if errors.Is(err, posts.ErrPostNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
+		}
+		slog.ErrorContext(ctx, "Failed to get post", "error", err, "slug", slug)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to get post"))
+	}
+
+	// Convert to proto
+	protoPost := &postsv1.Post{
+		Id:        post.ID.String(),
+		UserId:    post.UserID.String(),
+		Slug:      post.Slug.String(),
+		Title:     post.Title,
+		Content:   post.Content,
+		CreatedAt: timestamppb.New(post.CreatedAt),
+		UpdatedAt: timestamppb.New(post.UpdatedAt),
+	}
+
+	return connect.NewResponse(&postsv1.GetPostResponse{
+		Post: protoPost,
+	}), nil
+}
+
+// ListPosts retrieves all posts for a user
+func (h *PostServiceHandler) ListPosts(
+	ctx context.Context,
+	req *connect.Request[postsv1.ListPostsRequest],
+) (*connect.Response[postsv1.ListPostsResponse], error) {
+	// Validate request
+	if req.Msg.UserId == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("user_id is required"))
+	}
+
+	// Parse user ID
+	userID, err := uuid.Parse(req.Msg.UserId)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid user_id format"))
+	}
+
+	// List posts
+	postsList, err := h.service.ListUserPosts(ctx, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to list posts", "error", err, "user_id", userID)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to list posts"))
+	}
+
+	// Convert to proto
+	protoPosts := make([]*postsv1.Post, 0, len(postsList))
+	for _, post := range postsList {
+		protoPosts = append(protoPosts, &postsv1.Post{
+			Id:        post.ID.String(),
+			UserId:    post.UserID.String(),
+			Slug:      post.Slug.String(),
+			Title:     post.Title,
+			Content:   post.Content,
+			CreatedAt: timestamppb.New(post.CreatedAt),
+			UpdatedAt: timestamppb.New(post.UpdatedAt),
+		})
+	}
+
+	return connect.NewResponse(&postsv1.ListPostsResponse{
+		Posts: protoPosts,
+	}), nil
+}
+
+// UpdatePost updates an existing post
+func (h *PostServiceHandler) UpdatePost(
+	ctx context.Context,
+	req *connect.Request[postsv1.UpdatePostRequest],
+) (*connect.Response[postsv1.UpdatePostResponse], error) {
+	// Validate request
+	if req.Msg.Slug == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	}
+
+	// Validate at least one field is being updated
+	if req.Msg.Title == nil && req.Msg.Content == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one field must be updated"))
+	}
+
+	// Validate field lengths
+	if req.Msg.Title != nil && len(*req.Msg.Title) > 200 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title must be 200 characters or less"))
+	}
+	if req.Msg.Content != nil && len(*req.Msg.Content) > 10000 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("content must be 10000 characters or less"))
+	}
+
+	// Parse slug
+	slug, err := uuid.Parse(req.Msg.Slug)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+	}
+
+	// Prepare update values
+	title := ""
+	if req.Msg.Title != nil {
+		title = *req.Msg.Title
+	}
+	content := ""
+	if req.Msg.Content != nil {
+		content = *req.Msg.Content
+	}
+
+	// Update post
+	post, err := h.service.UpdatePost(ctx, slug, title, content)
+	if err != nil {
+		if errors.Is(err, posts.ErrPostNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
+		}
+		slog.ErrorContext(ctx, "Failed to update post", "error", err, "slug", slug)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to update post"))
+	}
+
+	// Convert to proto
+	protoPost := &postsv1.Post{
+		Id:        post.ID.String(),
+		UserId:    post.UserID.String(),
+		Slug:      post.Slug.String(),
+		Title:     post.Title,
+		Content:   post.Content,
+		CreatedAt: timestamppb.New(post.CreatedAt),
+		UpdatedAt: timestamppb.New(post.UpdatedAt),
+	}
+
+	return connect.NewResponse(&postsv1.UpdatePostResponse{
+		Post: protoPost,
+	}), nil
+}
+
+// DeletePost deletes a post by slug
+func (h *PostServiceHandler) DeletePost(
+	ctx context.Context,
+	req *connect.Request[postsv1.DeletePostRequest],
+) (*connect.Response[postsv1.DeletePostResponse], error) {
+	// Validate request
+	if req.Msg.Slug == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	}
+
+	// Parse slug
+	slug, err := uuid.Parse(req.Msg.Slug)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+	}
+
+	// Delete post
+	err = h.service.DeletePost(ctx, slug)
+	if err != nil {
+		if errors.Is(err, posts.ErrPostNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
+		}
+		slog.ErrorContext(ctx, "Failed to delete post", "error", err, "slug", slug)
+		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to delete post"))
+	}
+
+	return connect.NewResponse(&postsv1.DeletePostResponse{
+		Message: "Post deleted successfully",
+	}), nil
+}
+

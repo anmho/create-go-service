@@ -1,0 +1,19 @@
+# wgo configuration for hot reload
+# https://github.com/bokwoon95/wgo
+
+# Command to run
+run:
+  - go run cmd/api/main.go
+
+# Watch these directories
+watch:
+  - "**/*.go"
+  - "config.yaml"
+
+# Ignore these patterns
+ignore:
+  - "**/*_test.go"
+  - "**/testdata/**"
+  - "bin/**"
+  - "vendor/**"
+

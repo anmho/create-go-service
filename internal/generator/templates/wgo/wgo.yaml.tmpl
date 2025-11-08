@@ -1,0 +1,12 @@
+# wgo configuration for hot reload
+watch:
+  - paths:
+      - cmd
+      - internal
+    exclude:
+      - "**/*_test.go"
+      - "**/.*"
+
+run:
+  command: go run cmd/api/main.go
+

@@ -1,0 +1,37 @@
+module {{.ModulePath}}
+
+go 1.25
+
+require (
+{{- if .HasDynamoDB}}
+	github.com/aws/aws-sdk-go-v2 v1.24.0
+	github.com/aws/aws-sdk-go-v2/config v1.26.1
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.12.10
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.26.6
+{{- else if .HasPostgres}}
+	github.com/jackc/pgx/v5 v5.5.0
+	github.com/georgysavva/scany/v2 v2.1.0
+{{- end}}
+{{- if .HasMetrics}}
+	github.com/prometheus/client_golang v1.19.0
+{{- end}}
+{{- if .HasAuth}}
+	github.com/golang-jwt/jwt/v5 v5.2.0
+{{- end}}
+	github.com/caarlos0/env/v10 v10.0.0
+	github.com/google/uuid v1.6.0
+	gopkg.in/yaml.v3 v3.0.1
+{{- range .APITypes}}
+{{- if eq . "chi"}}
+	github.com/go-chi/chi/v5 v5.0.10
+{{- end}}
+{{- if eq . "huma"}}
+	github.com/danielgtaylor/huma/v2 v2.0.0
+{{- end}}
+{{- if eq . "grpc"}}
+	connectrpc.com/connect v1.15.0
+	google.golang.org/protobuf v1.33.0
+{{- end}}
+{{- end}}
+)
+

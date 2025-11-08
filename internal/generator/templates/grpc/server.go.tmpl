@@ -1,0 +1,245 @@
+package api
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"connectrpc.com/connect"
+	"connectrpc.com/grpchealth"
+	"connectrpc.com/grpcreflect"
+	"connectrpc.com/otelconnect"
+	"github.com/google/uuid"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
+	"{{.ModulePath}}/internal/config"
+	"{{.ModulePath}}/internal/posts"
+{{- if .HasDynamoDB}}
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+{{- end}}
+{{- if .HasPostgres}}
+	"github.com/jackc/pgx/v5/pgxpool"
+{{- end}}
+	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1"
+)
+
+// Server encapsulates the gRPC server and its dependencies
+type Server struct {
+	config      *config.Config
+	mux         *http.ServeMux
+{{- if .HasDynamoDB}}
+	dynamoDB    *dynamodb.Client
+{{- end}}
+{{- if .HasPostgres}}
+	pgPool      *pgxpool.Pool
+{{- end}}
+	postService *posts.Service
+}
+
+// New creates a new gRPC server with all dependencies wired up
+func New(
+	cfg *config.Config,
+{{- if .HasDynamoDB}}
+	dynamoDB *dynamodb.Client,
+{{- end}}
+{{- if .HasPostgres}}
+	pgPool *pgxpool.Pool,
+{{- end}}
+	postService *posts.Service,
+) *Server {
+	s := &Server{
+		config:      cfg,
+		mux:         http.NewServeMux(),
+{{- if .HasDynamoDB}}
+		dynamoDB:    dynamoDB,
+{{- end}}
+{{- if .HasPostgres}}
+		pgPool:      pgPool,
+{{- end}}
+		postService: postService,
+	}
+
+	s.registerServices()
+	s.registerHealthCheck()
+	s.registerReflection()
+
+	return s
+}
+
+// registerServices registers all gRPC service handlers
+func (s *Server) registerServices() {
+	// Create interceptors chain
+	interceptors := connect.WithInterceptors(
+		// Request ID interceptor (extracts/generates request ID and adds to context)
+		unaryInterceptor(requestIDMiddleware),
+		// Logging interceptor (logs all requests/responses)
+		unaryInterceptor(loggingMiddleware),
+		// Recovery interceptor (catches panics and converts to gRPC errors)
+		unaryInterceptor(recoveryMiddleware),
+		// OpenTelemetry instrumentation (if metrics are enabled)
+		otelconnect.NewInterceptor(),
+	)
+
+	// Register PostService
+	postHandler := NewPostServiceHandler(s.postService)
+	path, handler := postsv1connect.NewPostServiceHandler(postHandler, interceptors)
+	s.mux.Handle(path, handler)
+
+	slog.Info("Registered gRPC service", "service", "PostService", "path", path)
+}
+
+// registerHealthCheck registers the gRPC health check service
+func (s *Server) registerHealthCheck() {
+	checker := grpchealth.NewStaticChecker(
+		postsv1connect.PostServiceName,
+	)
+	path, handler := grpchealth.NewHandler(checker)
+	s.mux.Handle(path, handler)
+	slog.Info("Registered gRPC health check", "path", path)
+}
+
+// registerReflection registers gRPC reflection for development
+func (s *Server) registerReflection() {
+	// Enable reflection only in local stage
+	if !s.config.Server.Stage.IsLocal() {
+		slog.Info("gRPC reflection disabled", "stage", s.config.Server.Stage)
+		return
+	}
+
+	reflector := grpcreflect.NewStaticReflector(
+		postsv1connect.PostServiceName,
+	)
+	s.mux.Handle(grpcreflect.NewHandlerV1(reflector))
+	s.mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+	slog.Info("Registered gRPC reflection", "stage", s.config.Server.Stage)
+}
+
+// Handler returns the HTTP handler for the gRPC server
+// This handler supports both gRPC and gRPC-Web protocols
+func (s *Server) Handler() http.Handler {
+	// Use h2c (HTTP/2 Cleartext) for local development
+	// In production, TLS termination happens at the load balancer
+	return h2c.NewHandler(s.mux, &http2.Server{
+		MaxConcurrentStreams: 1000,
+		IdleTimeout:          60 * time.Second,
+	})
+}
+
+// ServeHTTP implements http.Handler
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.Handler().ServeHTTP(w, r)
+}
+
+// Shutdown gracefully shuts down the server
+func (s *Server) Shutdown(ctx context.Context) error {
+	slog.Info("Shutting down gRPC server")
+{{- if .HasPostgres}}
+	if s.pgPool != nil {
+		s.pgPool.Close()
+		slog.Info("Closed PostgreSQL connection pool")
+	}
+{{- end}}
+	return nil
+}
+
+// unaryInterceptor creates a Connect interceptor from a unary middleware function.
+// This is the recommended pattern for creating interceptors that only need to wrap unary RPCs.
+func unaryInterceptor(middleware func(connect.UnaryFunc) connect.UnaryFunc) connect.Interceptor {
+	return connect.UnaryInterceptorFunc(middleware)
+}
+
+// requestIDMiddleware extracts or generates a request ID and adds it to the context
+func requestIDMiddleware(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		// Extract request ID from header or generate one
+		requestID := req.Header().Get("X-Request-ID")
+		if requestID == "" {
+			requestID = req.Header().Get("X-Request-Id")
+		}
+		if requestID == "" {
+			// Generate a new request ID if not provided
+			requestID = generateRequestID()
+		}
+
+		// Add request ID to context for use in handlers and logging
+		ctx = context.WithValue(ctx, "request_id", requestID)
+
+		// Call next handler
+		resp, err := next(ctx, req)
+
+		// Add request ID to response headers
+		if resp != nil {
+			resp.Header().Set("X-Request-ID", requestID)
+		}
+
+		return resp, err
+	}
+}
+
+// generateRequestID generates a unique request ID
+func generateRequestID() string {
+	return uuid.New().String()
+}
+
+// loggingMiddleware logs all gRPC requests and responses
+func loggingMiddleware(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		start := time.Now()
+		
+		// Get request ID from context
+		requestID := getRequestID(ctx)
+		
+		slog.InfoContext(ctx, "gRPC request started",
+			"request_id", requestID,
+			"procedure", req.Spec().Procedure,
+			"protocol", req.Peer().Protocol,
+			"peer", req.Peer().Addr,
+		)
+
+		resp, err := next(ctx, req)
+		
+		duration := time.Since(start)
+		if err != nil {
+			slog.ErrorContext(ctx, "gRPC request failed",
+				"request_id", requestID,
+				"procedure", req.Spec().Procedure,
+				"duration_ms", duration.Milliseconds(),
+				"error", err,
+			)
+		} else {
+			slog.InfoContext(ctx, "gRPC request completed",
+				"request_id", requestID,
+				"procedure", req.Spec().Procedure,
+				"duration_ms", duration.Milliseconds(),
+			)
+		}
+
+		return resp, err
+	}
+}
+
+// getRequestID extracts the request ID from context
+func getRequestID(ctx context.Context) string {
+	if requestID, ok := ctx.Value("request_id").(string); ok {
+		return requestID
+	}
+	return ""
+}
+
+// recoveryMiddleware catches panics and converts them to gRPC errors
+func recoveryMiddleware(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (resp connect.AnyResponse, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.ErrorContext(ctx, "Panic recovered in gRPC handler",
+					"procedure", req.Spec().Procedure,
+					"panic", r,
+				)
+				err = connect.NewError(connect.CodeInternal, connect.NewError(connect.CodeInternal, nil))
+			}
+		}()
+		return next(ctx, req)
+	}
+}

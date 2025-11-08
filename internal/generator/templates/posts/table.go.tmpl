@@ -1,0 +1,149 @@
+package posts
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
+)
+
+const (
+	TableName = "{{.ProjectName}}-posts"
+	SlugIndex = "SlugIndex"
+)
+
+// Table is a repository for DynamoDB operations on posts
+type Table struct {
+	client *dynamodb.Client
+}
+
+// NewTable creates a new posts table repository and tests the connection
+// by describing the table to fail fast if the connection fails
+func NewTable(ctx context.Context, client *dynamodb.Client) (*Table, error) {
+	// Test connection by describing the table - fail fast if connection fails
+	_, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(TableName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to DynamoDB table %s: %w", TableName, err)
+	}
+
+	return &Table{
+		client: client,
+	}, nil
+}
+
+// Put saves a post to DynamoDB
+func (t *Table) Put(ctx context.Context, post *Post) error {
+	item, err := attributevalue.MarshalMap(post)
+	if err != nil {
+		return fmt.Errorf("failed to marshal post: %w", err)
+	}
+
+	_, err = t.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(TableName),
+		Item:      item,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to put post: %w", err)
+	}
+
+	return nil
+}
+
+// Get retrieves a post by UserID and PostID (primary key)
+func (t *Table) Get(ctx context.Context, userID, postID uuid.UUID) (*Post, error) {
+	result, err := t.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(TableName),
+		Key: map[string]types.AttributeValue{
+			"UserID": &types.AttributeValueMemberS{Value: userID.String()},
+			"PostID": &types.AttributeValueMemberS{Value: postID.String()},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get post: %w", err)
+	}
+
+	if result.Item == nil {
+		return nil, nil
+	}
+
+	var post Post
+	if err := attributevalue.UnmarshalMap(result.Item, &post); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
+	}
+
+	return &post, nil
+}
+
+// GetBySlug retrieves a post by its slug using GSI
+func (t *Table) GetBySlug(ctx context.Context, slug uuid.UUID) (*Post, error) {
+	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(TableName),
+		IndexName:              aws.String(SlugIndex),
+		KeyConditionExpression: aws.String("Slug = :slug"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":slug": &types.AttributeValueMemberS{Value: slug.String()},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query post by slug: %w", err)
+	}
+
+	if len(result.Items) == 0 {
+		return nil, nil
+	}
+
+	var post Post
+	if err := attributevalue.UnmarshalMap(result.Items[0], &post); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
+	}
+
+	return &post, nil
+}
+
+// ListByUser retrieves all posts for a user
+func (t *Table) ListByUser(ctx context.Context, userID uuid.UUID) ([]*Post, error) {
+	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(TableName),
+		KeyConditionExpression: aws.String("UserID = :userID"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":userID": &types.AttributeValueMemberS{Value: userID.String()},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query posts: %w", err)
+	}
+
+	posts := make([]*Post, 0, len(result.Items))
+	for _, item := range result.Items {
+		var post Post
+		if err := attributevalue.UnmarshalMap(item, &post); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal post: %w", err)
+		}
+		posts = append(posts, &post)
+	}
+
+	return posts, nil
+}
+
+// Delete removes a post from DynamoDB
+func (t *Table) Delete(ctx context.Context, userID, postID uuid.UUID) error {
+	_, err := t.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(TableName),
+		Key: map[string]types.AttributeValue{
+			"UserID": &types.AttributeValueMemberS{Value: userID.String()},
+			"PostID": &types.AttributeValueMemberS{Value: postID.String()},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete post: %w", err)
+	}
+
+	return nil
+}
+

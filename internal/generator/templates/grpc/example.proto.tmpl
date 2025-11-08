@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package {{.ProjectName}}.v1;
+
+option go_package = "{{.ModulePath}}/protos/gen/{{.ProjectName}}/v1;{{.ProjectName}}v1";
+
+// Example service - replace with your actual service definition
+service ExampleService {
+  // Example RPC method
+  rpc GetExample(GetExampleRequest) returns (GetExampleResponse) {}
+}
+
+message GetExampleRequest {
+  string id = 1;
+}
+
+message GetExampleResponse {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+}
+

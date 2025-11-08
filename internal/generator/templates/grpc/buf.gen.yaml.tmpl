@@ -1,0 +1,16 @@
+version: v2
+plugins:
+  # Generate Go protobuf code
+  - remote: buf.build/protocolbuffers/go
+    out: protos/gen
+    opt:
+      - paths=source_relative
+  
+  # Generate ConnectRPC Go code
+  - remote: buf.build/connectrpc/go
+    out: protos/gen
+    opt:
+      - paths=source_relative
+
+inputs:
+  - directory: protos

@@ -1,0 +1,32 @@
+package cli
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var (
+	// Version is set during build
+	Version = "dev"
+	// Commit is set during build
+	Commit = "unknown"
+	// BuildTime is set during build
+	BuildTime = "unknown"
+)
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information",
+	Long:  `Display version, commit, and build time information.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("postctl version %s\n", Version)
+		fmt.Printf("  commit:     %s\n", Commit)
+		fmt.Printf("  build time: %s\n", BuildTime)
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
+}
+

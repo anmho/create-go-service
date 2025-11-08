@@ -1,0 +1,32 @@
+package cli
+
+import (
+	"github.com/spf13/cobra"
+)
+
+var (
+	// Global flags
+	configFile string
+	endpoint   string
+	userID     string
+)
+
+// rootCmd represents the base command
+var rootCmd = &cobra.Command{
+	Use:   "postctl",
+	Short: "{{.ProjectName}} CLI tool",
+	Long:  `Command-line interface for managing {{.ProjectName}}.`,
+}
+
+// Execute runs the root command
+func Execute() error {
+	return rootCmd.Execute()
+}
+
+func init() {
+	// Global flags
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "config file (default is ./config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "http://localhost:8080", "API server endpoint")
+	rootCmd.PersistentFlags().StringVar(&userID, "user-id", "", "User ID for authentication")
+}
+

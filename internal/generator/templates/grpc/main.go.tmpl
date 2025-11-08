@@ -1,0 +1,168 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"{{.ModulePath}}/internal/config"
+{{- if .HasDynamoDB}}
+	"{{.ModulePath}}/internal/database"
+{{- end}}
+{{- if .HasPostgres}}
+	"{{.ModulePath}}/internal/database"
+{{- end}}
+	"{{.ModulePath}}/internal/api"
+	"{{.ModulePath}}/internal/posts"
+{{- if .HasDynamoDB}}
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+{{- end}}
+{{- if .HasPostgres}}
+	"github.com/jackc/pgx/v5/pgxpool"
+{{- end}}
+)
+
+func main() {
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Configure structured logging
+	logLevel := slog.LevelInfo
+	if cfg.Server.Stage.IsLocal() {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("Starting gRPC server",
+		"stage", cfg.Server.Stage,
+		"port", cfg.Server.Port,
+	)
+
+	// Initialize database
+	ctx := context.Background()
+{{- if .HasDynamoDB}}
+	// Initialize DynamoDB client
+	// Uses endpoint URL if provided (for local development), otherwise uses IAM roles on AWS infrastructure
+	opts := []database.DynamoDBOption{
+		database.WithRegion(cfg.Database.AWSRegion),
+	}
+	if cfg.Database.EndpointURL != "" {
+		opts = append(opts, database.WithEndpoint(cfg.Database.EndpointURL))
+	}
+	dynamoClient, err := database.NewDynamoDB(ctx, opts...)
+	if err != nil {
+		log.Fatalf("Failed to create DynamoDB client: %v", err)
+	}
+
+	// Initialize repositories - creates table if it doesn't exist
+	// This ensures the table schema is consistent between tests and production
+	postRepo, err := posts.NewDynamoDBTable(ctx, dynamoClient, cfg.Database.TableName)
+	if err != nil {
+		log.Fatalf("Failed to initialize posts repository: %v", err)
+	}
+	logFields := []interface{}{
+		"table", cfg.Database.TableName,
+		"region", cfg.Database.AWSRegion,
+	}
+	if cfg.Database.EndpointURL != "" {
+		logFields = append(logFields, "endpoint", cfg.Database.EndpointURL)
+	}
+	slog.Info("DynamoDB connection successful", logFields...)
+{{- end}}
+{{- if .HasPostgres}}
+	pgPool, err := database.NewPostgres(ctx, cfg.Secrets.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to create PostgreSQL connection pool: %v", err)
+	}
+	defer pgPool.Close()
+
+	// Initialize repositories - tests connection during creation
+	// Note: Tables are created via Atlas Go migrations
+	// The application assumes the table already exists
+	postRepo, err := posts.NewPostTable(ctx, pgPool)
+	if err != nil {
+		log.Fatalf("Failed to initialize posts repository: %v", err)
+	}
+	slog.Info("PostgreSQL connection successful")
+{{- end}}
+
+	// Initialize services
+	postService := posts.NewService(postRepo)
+
+	// Create gRPC server
+	server := api.New(
+		cfg,
+{{- if .HasDynamoDB}}
+		dynamoClient,
+{{- end}}
+{{- if .HasPostgres}}
+		pgPool,
+{{- end}}
+		postService,
+	)
+
+	// Create HTTP server
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%s", cfg.Server.Port),
+		Handler:           server,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+
+	// Start server in a goroutine
+	serverErrors := make(chan error, 1)
+	go func() {
+		slog.Info("gRPC server listening", "addr", srv.Addr)
+		serverErrors <- srv.ListenAndServe()
+	}()
+
+	// Wait for interrupt signal or server error
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Server error", "error", err)
+			os.Exit(1)
+		}
+	case sig := <-shutdown:
+		slog.Info("Shutdown signal received", "signal", sig)
+
+		// Graceful shutdown with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Error("Graceful shutdown failed", "error", err)
+			if err := srv.Close(); err != nil {
+				slog.Error("Force shutdown failed", "error", err)
+			}
+			os.Exit(1)
+		}
+
+		// Shutdown gRPC server (closes database connections)
+		if err := server.Shutdown(ctx); err != nil {
+			slog.Error("gRPC server shutdown failed", "error", err)
+		}
+
+		slog.Info("Server stopped gracefully")
+	}
+}
+

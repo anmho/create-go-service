@@ -1,0 +1,91 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+)
+
+var seedCmd = &cobra.Command{
+	Use:   "seed",
+	Short: "Seed the database with sample data via API",
+	Long:  `Populate the database with sample posts by calling the API.`,
+	RunE:  seedDatabase,
+}
+
+func init() {
+	rootCmd.AddCommand(seedCmd)
+
+	// Seed command flags
+	seedCmd.Flags().IntP("count", "c", 10, "Number of sample posts to create")
+}
+
+func seedDatabase(cmd *cobra.Command, args []string) error {
+	count, _ := cmd.Flags().GetInt("count")
+
+	if userID == "" {
+		userID = uuid.New().String()
+		log.Printf("Generated user ID: %s", userID)
+	}
+
+	// Validate user ID
+	if _, err := uuid.Parse(userID); err != nil {
+		return fmt.Errorf("invalid user-id: %w", err)
+	}
+
+	// Create sample posts via API
+	log.Printf("Creating %d sample posts for user %s...", count, userID)
+	for i := 1; i <= count; i++ {
+		title := fmt.Sprintf("Sample Post %d", i)
+		content := fmt.Sprintf("This is sample content for post number %d.", i)
+
+		payload := map[string]string{
+			"title":   title,
+			"content": content,
+		}
+
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		req, err := http.NewRequest("POST", endpoint+"/api/v1/posts", bytes.NewBuffer(body))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-ID", userID)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("failed to create post %d: %s - %s", i, resp.Status, string(body))
+		}
+
+		var post Post
+		d := json.NewDecoder(resp.Body)
+		d.DisallowUnknownFields()
+		if err := d.Decode(&post); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		log.Printf("✓ Created post: %s (slug: %s)", post.Title, post.Slug)
+	}
+
+	log.Printf("\n✓ Successfully created %d posts!", count)
+	log.Printf("User ID: %s", userID)
+	return nil
+}
+

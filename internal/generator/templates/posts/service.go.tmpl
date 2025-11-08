@@ -1,0 +1,91 @@
+package posts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+var (
+	// ErrPostNotFound is returned when a post is not found
+	ErrPostNotFound = errors.New("post not found")
+)
+
+// Service defines the interface for post business logic
+type Service interface {
+	CreatePost(ctx context.Context, userID uuid.UUID, title, content string) (*Post, error)
+	GetPost(ctx context.Context, slug uuid.UUID) (*Post, error)
+	ListUserPosts(ctx context.Context, userID uuid.UUID) ([]Post, error)
+	UpdatePost(ctx context.Context, slug uuid.UUID, title, content string) (*Post, error)
+	DeletePost(ctx context.Context, slug uuid.UUID) error
+}
+
+// service implements the Service interface
+type service struct {
+	repo Repository
+}
+
+// NewService creates a new posts service
+func NewService(repo Repository) Service {
+	return &service{repo: repo}
+}
+
+// CreatePost creates a new post
+func (s *service) CreatePost(ctx context.Context, userID uuid.UUID, title, content string) (*Post, error) {
+	post := NewPost(userID, title, content)
+	if err := s.repo.PutPost(ctx, post); err != nil {
+		return nil, fmt.Errorf("failed to create post: %w", err)
+	}
+	return post, nil
+}
+
+// GetPost retrieves a post by its slug
+func (s *service) GetPost(ctx context.Context, slug uuid.UUID) (*Post, error) {
+	post, err := s.repo.GetPostBySlug(ctx, slug)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get post by slug %s: %w", slug, err)
+	}
+	return post, nil
+}
+
+// ListUserPosts lists all posts for a given user
+func (s *service) ListUserPosts(ctx context.Context, userID uuid.UUID) ([]Post, error) {
+	posts, err := s.repo.ListPostsByUserID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list posts for user %s: %w", userID, err)
+	}
+	return posts, nil
+}
+
+// UpdatePost updates an existing post
+func (s *service) UpdatePost(ctx context.Context, slug uuid.UUID, title, content string) (*Post, error) {
+	existingPost, err := s.repo.GetPostBySlug(ctx, slug)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find post to update with slug %s: %w", slug, err)
+	}
+
+	// Update fields if provided
+	if title != "" {
+		existingPost.Title = title
+	}
+	if content != "" {
+		existingPost.Content = content
+	}
+	existingPost.UpdatedAt = time.Now()
+
+	if err := s.repo.PutPost(ctx, existingPost); err != nil {
+		return nil, fmt.Errorf("failed to update post with slug %s: %w", slug, err)
+	}
+	return existingPost, nil
+}
+
+// DeletePost deletes a post by its slug
+func (s *service) DeletePost(ctx context.Context, slug uuid.UUID) error {
+	if err := s.repo.DeletePost(ctx, slug); err != nil {
+		return fmt.Errorf("failed to delete post with slug %s: %w", slug, err)
+	}
+	return nil
+}

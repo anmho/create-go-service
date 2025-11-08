@@ -1,0 +1,269 @@
+package posts
+
+import (
+	"log/slog"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"{{.ModulePath}}/internal/json"
+{{- if .HasPostHog}}
+	"{{.ModulePath}}/internal/posthog"
+{{- end}}
+)
+
+// RegisterRoutes registers all post routes with the given service
+func RegisterRoutes(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}, r chi.Router) {
+	r.Route("/posts", func(r chi.Router) {
+		r.Post("/", createPost(service{{- if .HasPostHog}}, posthogClient{{- end}}))
+		r.Get("/", listPosts(service{{- if .HasPostHog}}, posthogClient{{- end}}))
+		r.Get("/{slug}", getPost(service{{- if .HasPostHog}}, posthogClient{{- end}}))
+		r.Put("/{slug}", updatePost(service{{- if .HasPostHog}}, posthogClient{{- end}}))
+		r.Delete("/{slug}", deletePost(service{{- if .HasPostHog}}, posthogClient{{- end}}))
+	})
+}
+
+// CreatePostRequest represents the request body for creating a post
+type CreatePostRequest struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+// UpdatePostRequest represents the request body for updating a post
+type UpdatePostRequest struct {
+	Title   string `json:"title,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// getUserIDFromHeader extracts and validates the user ID from the X-User-ID header
+func getUserIDFromHeader(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	userIDStr := r.Header.Get("X-User-ID")
+	if userIDStr == "" {
+		json.JSONError(w, "Missing X-User-ID header", http.StatusBadRequest)
+		return uuid.Nil, false
+	}
+
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		slog.Error("Invalid user ID", "error", err, "user_id", userIDStr)
+		json.JSONError(w, "Invalid user ID", http.StatusBadRequest)
+		return uuid.Nil, false
+	}
+
+	return userID, true
+}
+
+// createPost handles POST /posts
+func createPost(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from header (in production, this would come from JWT)
+		userID, ok := getUserIDFromHeader(w, r)
+		if !ok {
+			return
+		}
+
+		// Parse request body
+		req, err := json.Body[CreatePostRequest](r.Body)
+		if err != nil {
+			slog.Error("Failed to decode request body", "error", err)
+			json.JSONError(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate
+		if req.Title == "" {
+			json.JSONError(w, "Title is required", http.StatusBadRequest)
+			return
+		}
+
+		// Create post
+		post, err := service.CreatePost(r.Context(), userID, req.Title, req.Content)
+		if err != nil {
+			slog.Error("Failed to create post", "error", err)
+			json.JSONError(w, "Failed to create post", http.StatusInternalServerError)
+			return
+		}
+
+		// Capture PostHog event
+{{- if .HasPostHog}}
+		posthogClient.Capture(r.Context(), userID.String(), "post_created", map[string]interface{}{
+			"post_id": post.ID.String(),
+			"title":   post.Title,
+		})
+{{- end}}
+
+		json.JSON(w, post, http.StatusCreated)
+	}
+}
+
+// getPost handles GET /posts/{slug}
+func getPost(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slugStr := chi.URLParam(r, "slug")
+		slug, err := uuid.Parse(slugStr)
+		if err != nil {
+			slog.Error("Invalid slug", "error", err, "slug", slugStr)
+			json.JSONError(w, "Invalid slug", http.StatusBadRequest)
+			return
+		}
+
+		post, err := service.GetPost(r.Context(), slug)
+		if err == ErrPostNotFound {
+			slog.Info("Post not found", "slug", slug)
+			json.JSONError(w, "Post not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			slog.Error("Failed to get post", "error", err)
+			json.JSONError(w, "Failed to get post", http.StatusInternalServerError)
+			return
+		}
+
+		// Capture PostHog event
+{{- if .HasPostHog}}
+		userIDStr := r.Header.Get("X-User-ID")
+		if userIDStr != "" {
+			posthogClient.Capture(r.Context(), userIDStr, "post_viewed", map[string]interface{}{
+				"post_id": post.ID.String(),
+			})
+		}
+{{- end}}
+
+		json.JSON(w, post, http.StatusOK)
+	}
+}
+
+// listPosts handles GET /posts
+func listPosts(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from query param or header
+		userIDStr := r.URL.Query().Get("user_id")
+		if userIDStr == "" {
+			userIDStr = r.Header.Get("X-User-ID")
+		}
+		if userIDStr == "" {
+			json.JSONError(w, "Missing user_id parameter or X-User-ID header", http.StatusBadRequest)
+			return
+		}
+
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			slog.Error("Invalid user ID", "error", err, "user_id", userIDStr)
+			json.JSONError(w, "Invalid user ID", http.StatusBadRequest)
+			return
+		}
+
+		postList, err := service.ListUserPosts(r.Context(), userID)
+		if err != nil {
+			slog.Error("Failed to list posts", "error", err, "user_id", userID)
+			json.JSONError(w, "Failed to list posts", http.StatusInternalServerError)
+			return
+		}
+
+		// Capture PostHog event
+{{- if .HasPostHog}}
+		posthogClient.Capture(r.Context(), userID.String(), "posts_listed", map[string]interface{}{
+			"count": len(postList),
+		})
+{{- end}}
+
+		json.JSON(w, postList, http.StatusOK)
+	}
+}
+
+// updatePost handles PUT /posts/{slug}
+func updatePost(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from header (in production, this would come from JWT)
+		userID, ok := getUserIDFromHeader(w, r)
+		if !ok {
+			return
+		}
+
+		slugStr := chi.URLParam(r, "slug")
+		slug, err := uuid.Parse(slugStr)
+		if err != nil {
+			slog.Error("Invalid slug", "error", err, "slug", slugStr)
+			json.JSONError(w, "Invalid slug", http.StatusBadRequest)
+			return
+		}
+
+		// Parse request body
+		req, err := json.Body[UpdatePostRequest](r.Body)
+		if err != nil {
+			slog.Error("Failed to decode request body", "error", err)
+			json.JSONError(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Update post
+		post, err := service.UpdatePost(r.Context(), slug, req.Title, req.Content)
+		if err == ErrPostNotFound {
+			slog.Info("Post not found for update", "slug", slug, "user_id", userID)
+			json.JSONError(w, "Post not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			slog.Error("Failed to update post", "error", err, "user_id", userID, "slug", slug)
+			json.JSONError(w, "Failed to update post", http.StatusInternalServerError)
+			return
+		}
+
+		// Capture PostHog event
+{{- if .HasPostHog}}
+		posthogClient.Capture(r.Context(), userID.String(), "post_updated", map[string]interface{}{
+			"post_id": post.ID.String(),
+		})
+{{- else}}
+		// Log successful update (userID validated but not used for PostHog when disabled)
+		_ = userID
+{{- end}}
+
+		json.JSON(w, post, http.StatusOK)
+	}
+}
+
+// deletePost handles DELETE /posts/{slug}
+func deletePost(service Service{{- if .HasPostHog}}, posthogClient posthog.Client{{- end}}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from header (in production, this would come from JWT)
+		userID, ok := getUserIDFromHeader(w, r)
+		if !ok {
+			return
+		}
+
+		slugStr := chi.URLParam(r, "slug")
+		slug, err := uuid.Parse(slugStr)
+		if err != nil {
+			slog.Error("Invalid slug", "error", err, "slug", slugStr)
+			json.JSONError(w, "Invalid slug", http.StatusBadRequest)
+			return
+		}
+
+		err = service.DeletePost(r.Context(), slug)
+		if err == ErrPostNotFound {
+			slog.Info("Post not found for delete", "slug", slug, "user_id", userID)
+			json.JSONError(w, "Post not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			slog.Error("Failed to delete post", "error", err, "user_id", userID, "slug", slug)
+			json.JSONError(w, "Failed to delete post", http.StatusInternalServerError)
+			return
+		}
+
+		// Capture PostHog event
+{{- if .HasPostHog}}
+		posthogClient.Capture(r.Context(), userID.String(), "post_deleted", map[string]interface{}{
+			"post_id": slug.String(),
+		})
+{{- else}}
+		// Log successful delete (userID validated but not used for PostHog when disabled)
+		_ = userID
+{{- end}}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+

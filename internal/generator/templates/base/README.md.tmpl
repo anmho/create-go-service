@@ -1,0 +1,146 @@
+# {{.ProjectName}}
+
+{{.ProjectName}} is a Go microservice generated with create-go-service.
+
+## Features
+
+{{- if .HasMetrics}}
+- Prometheus metrics instrumentation
+{{- end}}
+{{- if .HasAuth}}
+- JWT authentication
+{{- end}}
+{{- if .HasChi}}
+- REST API with Chi router
+{{- end}}
+{{- if .HasHuma}}
+- REST API with Huma (OpenAPI/Swagger)
+{{- end}}
+{{- if .HasGRPC}}
+- gRPC with ConnectRPC
+- Protocol buffer definitions in `protos/` directory
+- Buf for proto generation and management
+{{- end}}
+- Prometheus metrics at `/metrics`
+- Hot reload with wgo for development
+- DynamoDB database integration
+
+## Quick Start
+
+### Local Development
+
+1. **Start dependencies:**
+   ```bash
+   docker compose up -d
+   ```
+
+{{- if .HasGRPC}}
+2. **Generate protobuf code:**
+   ```bash
+   make generate
+   ```
+   
+   Note: Requires [buf](https://buf.build/docs/installation) to be installed.
+
+3. **Run the service:**
+{{- else}}
+2. **Run the service:**
+{{- end}}
+   ```bash
+   make run
+   ```
+
+   Or with hot reload:
+   ```bash
+   wgo run cmd/api/main.go
+   ```
+
+### CLI Tool (postctl)
+
+Build and install the CLI:
+
+```bash
+make build-cli        # Build to bin/postctl
+make install-cli      # Install to /usr/local/bin
+```
+
+Commands:
+
+```bash
+# Seed database with sample data
+postctl seed --count 10 --user-id <uuid>
+
+# Posts CRUD (requires API server running)
+postctl posts create \
+  --user-id <uuid> \
+  --title "Hello" \
+  --content "World"
+
+postctl posts list --user-id <uuid>
+postctl posts get <slug>
+postctl posts update <slug> --title "New Title"
+postctl posts delete <slug>
+
+# Version
+postctl version
+```
+
+### Configuration
+
+The service uses environment variables for configuration. See `.env.example` for available options.
+
+### Monitoring
+
+Prometheus metrics are exposed at `/metrics` and automatically scraped by Fly.io every 15 seconds.
+
+Access metrics locally:
+```bash
+curl http://localhost:8080/metrics
+```
+
+## Development
+
+- `make run` - Run the service
+- `make test` - Run tests
+- `make build` - Build the binary
+- `make deploy` - Deploy to Fly.io
+
+## Deployment
+
+This service is configured for deployment on Fly.io.
+
+### First Time Setup
+
+1. **Install Fly.io CLI**:
+   ```bash
+   curl -L https://fly.io/install.sh | sh
+   ```
+
+2. **Login to Fly.io**:
+   ```bash
+   flyctl auth login
+   ```
+
+3. **Set secrets** (if using database/auth):
+   ```bash
+{{- if .HasPostgres}}
+   flyctl secrets set DATABASE_URL="your-database-url"
+{{- end}}
+{{- if .HasAuth}}
+   flyctl secrets set JWT_SECRET="your-secret-key"
+{{- end}}
+   ```
+
+### Deploy
+
+Simply run:
+
+```bash
+make deploy
+```
+
+**First deployment**: Creates the Fly.io app and deploys it  
+**Subsequent deploys**: Updates the existing app
+
+The Makefile automatically detects if this is your first deployment and runs the appropriate command.
+

@@ -1,0 +1,313 @@
+package posts
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+func setupTestDynamoDB(t *testing.T) (*dynamodb.Client, string, func()) {
+	ctx := context.Background()
+
+	// Start DynamoDB Local container (official AWS tool - lighter and faster than LocalStack)
+	req := testcontainers.ContainerRequest{
+		Image:        "amazon/dynamodb-local:latest",
+		ExposedPorts: []string{"8000/tcp"},
+		Cmd:          []string{"-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"},
+		WaitingFor:   wait.ForHTTP("/").WithPath("/").WithStartupTimeout(10*time.Second),
+	}
+	
+	dynamoContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	require.NoError(t, err)
+
+	// Get endpoint
+	endpoint, err := dynamoContainer.Endpoint(ctx, "")
+	require.NoError(t, err)
+
+	// Create DynamoDB client
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{
+					URL:           endpoint,
+					SigningRegion: "us-east-1",
+				}, nil
+			})),
+	)
+	require.NoError(t, err)
+
+	client := dynamodb.NewFromConfig(cfg)
+
+	// Create table
+	tableName := "test-posts"
+	_, err = client.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(tableName),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{
+				AttributeName: aws.String("UserID"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+			{
+				AttributeName: aws.String("PostID"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+			{
+				AttributeName: aws.String("Slug"),
+				AttributeType: types.ScalarAttributeTypeS,
+			},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{
+				AttributeName: aws.String("UserID"),
+				KeyType:       types.KeyTypeHash,
+			},
+			{
+				AttributeName: aws.String("PostID"),
+				KeyType:       types.KeyTypeRange,
+			},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("SlugIndex"),
+				KeySchema: []types.KeySchemaElement{
+					{
+						AttributeName: aws.String("Slug"),
+						KeyType:       types.KeyTypeHash,
+					},
+				},
+				Projection: &types.Projection{
+					ProjectionType: types.ProjectionTypeAll,
+				},
+			},
+		},
+		BillingMode: types.BillingModePayPerRequest,
+	})
+	require.NoError(t, err)
+
+	// Wait for table to be active
+	waiter := dynamodb.NewTableExistsWaiter(client)
+	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	}, 30*time.Second)
+	require.NoError(t, err)
+
+	// Cleanup function
+	cleanup := func() {
+		_, _ = client.DeleteTable(ctx, &dynamodb.DeleteTableInput{
+			TableName: aws.String(tableName),
+		})
+		require.NoError(t, dynamoContainer.Terminate(ctx))
+	}
+
+	return client, tableName, cleanup
+}
+
+func TestPostTable_PutPost(t *testing.T) {
+	t.Parallel()
+	client, tableName, cleanup := setupTestDynamoDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewDynamoDBTable(ctx, client, tableName)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	assert.NoError(t, err)
+
+	// Verify post was inserted by getting it by slug
+	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, post.ID, retrieved.ID)
+}
+
+func TestPostTable_GetPostBySlug(t *testing.T) {
+	t.Parallel()
+	client, tableName, cleanup := setupTestDynamoDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewDynamoDBTable(ctx, client, tableName)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Get post by slug
+	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, post.ID, retrieved.ID)
+	assert.Equal(t, post.UserID, retrieved.UserID)
+	assert.Equal(t, post.Slug, retrieved.Slug)
+	assert.Equal(t, post.Title, retrieved.Title)
+	assert.Equal(t, post.Content, retrieved.Content)
+
+	// Test not found
+	_, err = table.GetPostBySlug(ctx, uuid.New())
+	assert.ErrorIs(t, err, ErrPostNotFound)
+}
+
+func TestPostTable_ListPostsByUserID(t *testing.T) {
+	t.Parallel()
+	client, tableName, cleanup := setupTestDynamoDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewDynamoDBTable(ctx, client, tableName)
+	require.NoError(t, err)
+
+	userID := uuid.New()
+	otherUserID := uuid.New()
+
+	// Create posts for user
+	post1 := &Post{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Slug:      uuid.New(),
+		Title:     "Post 1",
+		Content:   "Content 1",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	post2 := &Post{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Slug:      uuid.New(),
+		Title:     "Post 2",
+		Content:   "Content 2",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+	}
+	// Post for different user
+	post3 := &Post{
+		ID:        uuid.New(),
+		UserID:    otherUserID,
+		Slug:      uuid.New(),
+		Title:     "Post 3",
+		Content:   "Content 3",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post1)
+	require.NoError(t, err)
+	err = table.PutPost(ctx, post2)
+	require.NoError(t, err)
+	err = table.PutPost(ctx, post3)
+	require.NoError(t, err)
+
+	// List posts for user
+	posts, err := table.ListPostsByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.Len(t, posts, 2)
+
+	// List posts for other user
+	posts, err = table.ListPostsByUserID(ctx, otherUserID)
+	require.NoError(t, err)
+	assert.Len(t, posts, 1)
+	assert.Equal(t, post3.ID, posts[0].ID)
+}
+
+func TestPostTable_DeletePost(t *testing.T) {
+	t.Parallel()
+	client, tableName, cleanup := setupTestDynamoDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewDynamoDBTable(ctx, client, tableName)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Test Post",
+		Content:   "Test Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Delete post
+	err = table.DeletePost(ctx, post.Slug)
+	assert.NoError(t, err)
+
+	// Verify post was deleted
+	_, err = table.GetPostBySlug(ctx, post.Slug)
+	assert.ErrorIs(t, err, ErrPostNotFound)
+}
+
+func TestPostTable_UpdatePost(t *testing.T) {
+	t.Parallel()
+	client, tableName, cleanup := setupTestDynamoDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	table, err := NewDynamoDBTable(ctx, client, tableName)
+	require.NoError(t, err)
+
+	post := &Post{
+		ID:        uuid.New(),
+		UserID:    uuid.New(),
+		Slug:      uuid.New(),
+		Title:     "Original Title",
+		Content:   "Original Content",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Update post
+	post.Title = "Updated Title"
+	post.Content = "Updated Content"
+	post.UpdatedAt = time.Now()
+
+	err = table.PutPost(ctx, post)
+	require.NoError(t, err)
+
+	// Verify post was updated
+	retrieved, err := table.GetPostBySlug(ctx, post.Slug)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated Title", retrieved.Title)
+	assert.Equal(t, "Updated Content", retrieved.Content)
+}
+

@@ -1,0 +1,42 @@
+package posts
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Post represents a blog post or similar content
+type Post struct {
+	ID        uuid.UUID `json:"id" dynamodbav:"PostID" db:"id"`
+	UserID    uuid.UUID `json:"user_id" dynamodbav:"UserID" db:"user_id"`
+	Slug      uuid.UUID `json:"slug" dynamodbav:"Slug" db:"slug"`
+	Title     string    `json:"title" dynamodbav:"Title" db:"title"`
+	Content   string    `json:"content" dynamodbav:"Content" db:"content"`
+	CreatedAt time.Time `json:"created_at" dynamodbav:"CreatedAt" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" dynamodbav:"UpdatedAt" db:"updated_at"`
+}
+
+// NewPost creates a new Post instance
+func NewPost(userID uuid.UUID, title, content string) *Post {
+	now := time.Now()
+	return &Post{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Slug:      uuid.New(), // Public identifier
+		Title:     title,
+		Content:   content,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+// Repository defines the interface for post data operations
+// Note: Tables and indexes are created via Terraform infrastructure
+type Repository interface {
+	PutPost(ctx context.Context, post *Post) error
+	GetPostBySlug(ctx context.Context, slug uuid.UUID) (*Post, error)
+	ListPostsByUserID(ctx context.Context, userID uuid.UUID) ([]Post, error)
+	DeletePost(ctx context.Context, slug uuid.UUID) error
+}

@@ -1,0 +1,94 @@
+package main
+
+import (
+	"context"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"{{.ModulePath}}/internal/api"
+	"{{.ModulePath}}/internal/config"
+{{- if or .HasDynamoDB .HasPostgres}}
+	"{{.ModulePath}}/internal/database"
+{{- end}}
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Load configuration from YAML and environment
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "config.yaml"
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+
+	slog.Info("loaded configuration",
+		slog.String("environment", cfg.Server.Environment),
+		slog.String("port", cfg.Server.Port),
+	)
+
+{{- if .HasDynamoDB}}
+	// Initialize DynamoDB client
+	dynamoClient, err := database.NewDynamoDB(ctx,
+		database.WithEndpoint(cfg.Database.EndpointURL),
+		database.WithRegion(cfg.Database.AWSRegion),
+	)
+	if err != nil {
+		log.Fatalf("failed to create dynamo client: %v", err)
+	}
+{{- else if .HasPostgres}}
+	// Initialize PostgreSQL client
+	pgxPool, err := database.NewPostgres(ctx, cfg.Secrets.DatabaseURL)
+	if err != nil {
+		log.Fatalf("failed to create postgres client: %v", err)
+	}
+	defer pgxPool.Close()
+{{- end}}
+
+	// Initialize API server
+	s := api.New(cfg{{- if .HasDynamoDB}}, dynamoClient{{- end}}{{- if .HasPostgres}}, pgxPool{{- end}})
+
+	srv := &http.Server{
+		Addr:    ":" + cfg.Server.Port,
+		Handler: s,
+	}
+
+	// Start server in goroutine
+	go func() {
+		slog.Info("starting server",
+			slog.String("port", cfg.Server.Port),
+			slog.String("environment", cfg.Server.Environment),
+		)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal for graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down server...")
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("server forced to shutdown", slog.Any("error", err))
+	}
+
+	slog.Info("server exited")
+}
+

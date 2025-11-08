@@ -1,0 +1,139 @@
+package main
+
+import (
+	"context"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"{{.ModulePath}}/internal/api"
+	"{{.ModulePath}}/internal/config"
+{{- if or .HasDynamoDB .HasPostgres}}
+	"{{.ModulePath}}/internal/database"
+{{- end}}
+{{- if .HasPostHog}}
+	"{{.ModulePath}}/internal/posthog"
+{{- end}}
+	"{{.ModulePath}}/internal/posts"
+{{- if .HasDynamoDB}}
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+{{- end}}
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalln("failed to load config", err)
+	}
+
+{{- if .HasDynamoDB}}
+	// Initialize DynamoDB client
+	// Uses endpoint URL if provided (for local development), otherwise uses IAM roles on AWS infrastructure
+	opts := []database.DynamoDBOption{
+		database.WithRegion(cfg.Database.AWSRegion),
+	}
+	if cfg.Database.EndpointURL != "" {
+		opts = append(opts, database.WithEndpoint(cfg.Database.EndpointURL))
+	}
+	dynamoClient, err := database.NewDynamoDB(ctx, opts...)
+	if err != nil {
+		log.Fatalln("failed to create dynamo client", err)
+	}
+
+	// Initialize posts repository - creates table if it doesn't exist
+	// This ensures the table schema is consistent between tests and production
+	postRepo, err := posts.NewDynamoDBTable(ctx, dynamoClient, cfg.Database.TableName)
+	if err != nil {
+		log.Fatalln("failed to initialize posts repository:", err)
+	}
+	slog.Info("DynamoDB connection successful", "table", cfg.Database.TableName)
+{{- end}}
+{{- if .HasPostgres}}
+	// Initialize PostgreSQL connection pool
+	pgPool, err := database.NewPostgres(ctx, cfg.Secrets.DatabaseURL)
+	if err != nil {
+		log.Fatalln("failed to create postgres client", err)
+	}
+	defer pgPool.Close()
+
+	// Initialize posts repository - tests connection during creation
+	// Note: Tables are created via Atlas Go migrations
+	// The application assumes the table already exists
+	postRepo, err := posts.NewPostTable(ctx, pgPool)
+	if err != nil {
+		log.Fatalln("failed to initialize posts repository:", err)
+	}
+	slog.Info("PostgreSQL connection successful")
+{{- end}}
+
+	// Initialize posts service
+	postsService := posts.NewService(postRepo)
+
+{{- if .HasPostHog}}
+	// Initialize PostHog client
+	posthogConfig := &posthog.Config{
+		APIKey: cfg.Secrets.PostHogAPIKey,
+		Host:   cfg.PostHog.Host,
+	}
+	posthogClient, err := posthog.New(ctx, posthogConfig)
+	if err != nil {
+		log.Fatalln("failed to initialize PostHog client:", err)
+	}
+	if posthogClient == nil {
+		log.Fatalln("PostHog client is nil after initialization")
+	}
+	defer posthogClient.Close()
+{{- end}}
+
+	// Initialize API server
+	s := api.New(cfg,
+{{- if .HasDynamoDB}}
+		dynamoClient,
+{{- end}}
+{{- if .HasPostgres}}
+		pgPool,
+{{- end}}
+{{- if .HasPostHog}}
+		posthogClient,
+{{- end}}
+		postsService)
+
+	srv := &http.Server{
+		Addr:    ":" + cfg.Server.Port,
+		Handler: s,
+	}
+
+	// Start server in goroutine
+	go func() {
+		slog.Info("starting server", slog.String("port", cfg.Server.Port))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal for graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down server...")
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("server forced to shutdown", slog.Any("error", err))
+	}
+
+	slog.Info("server exited")
+}
+

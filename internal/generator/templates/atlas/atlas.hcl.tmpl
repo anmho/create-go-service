@@ -1,0 +1,26 @@
+# Atlas configuration for {{.ProjectName}}
+# See https://atlasgo.io/ for documentation
+
+env "local" {
+  # Local development database
+  # For Supabase local: postgres://postgres:postgres@localhost:54322/postgres
+  # For Docker: postgres://postgres:postgres@localhost:5432/{{.ProjectName}}?sslmode=disable
+  url = "postgres://postgres:postgres@localhost:5432/{{.ProjectName}}?sslmode=disable"
+  dev = "docker://postgres/15"
+}
+
+env "production" {
+  # Production database (Supabase or other PostgreSQL)
+  url = env("DATABASE_URL")
+}
+
+# Migration directory
+migration {
+  dir = "file://migrations"
+}
+
+# Schema file (optional - for declarative schema)
+# schema {
+#   src = "file://schema.sql"
+# }
+

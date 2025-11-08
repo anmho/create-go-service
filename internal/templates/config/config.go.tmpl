@@ -1,0 +1,124 @@
+package config
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/caarlos0/env/v10"
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+{{- if .HasAuth}}
+	Auth     AuthConfig     `yaml:"auth"`
+{{- end}}
+{{- if .HasMetrics}}
+	Metrics  MetricsConfig  `yaml:"metrics"`
+{{- end}}
+	
+	// Secrets loaded from environment variables
+	Secrets SecretsConfig `yaml:"-"`
+}
+
+type ServerConfig struct {
+	Port            string `yaml:"port" env:"PORT" envDefault:"8080"`
+	Environment     string `yaml:"environment" env:"ENV" envDefault:"local"`
+	EnableReflection bool  `yaml:"enable_reflection" env:"ENABLE_REFLECTION" envDefault:"true"`
+}
+
+type DatabaseConfig struct {
+{{- if .HasDynamoDB}}
+	AWSRegion   string `yaml:"aws_region" env:"AWS_REGION" envDefault:"us-east-1"`
+	TableName   string `yaml:"table_name" env:"TABLE_NAME" envDefault:"{{.ProjectName}}"`
+	EndpointURL string `yaml:"endpoint_url" env:"DYNAMODB_ENDPOINT" envDefault:""`
+{{- else if .HasPostgres}}
+	Host     string `yaml:"host" env:"DB_HOST" envDefault:"localhost"`
+	Port     int    `yaml:"port" env:"DB_PORT" envDefault:"5432"`
+	Database string `yaml:"database" env:"DB_NAME" envDefault:"{{.ProjectName}}"`
+	SSLMode  string `yaml:"ssl_mode" env:"DB_SSL_MODE" envDefault:"disable"`
+{{- end}}
+}
+
+{{- if .HasAuth}}
+type AuthConfig struct {
+	TokenExpiry string `yaml:"token_expiry" env:"TOKEN_EXPIRY" envDefault:"24h"`
+}
+{{- end}}
+
+{{- if .HasMetrics}}
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled" env:"METRICS_ENABLED" envDefault:"true"`
+	Path    string `yaml:"path" env:"METRICS_PATH" envDefault:"/metrics"`
+}
+{{- end}}
+
+// SecretsConfig holds sensitive data loaded only from environment variables
+type SecretsConfig struct {
+{{- if .HasPostgres}}
+	DatabaseURL string `env:"DATABASE_URL,required"`
+{{- end}}
+{{- if .HasAuth}}
+	JWTSecret   string `env:"JWT_SECRET,required"`
+{{- end}}
+}
+
+// Load reads configuration from YAML file and overrides with environment variables
+func Load(configPath string) (*Config, error) {
+	cfg := &Config{}
+
+	// Load from YAML file if it exists
+	if configPath != "" {
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("failed to read config file: %w", err)
+			}
+			// File doesn't exist, continue with defaults
+		} else {
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("failed to parse config file: %w", err)
+			}
+		}
+	}
+
+	// Override with environment variables
+	if err := env.Parse(&cfg.Server); err != nil {
+		return nil, fmt.Errorf("failed to parse server config from env: %w", err)
+	}
+
+	if err := env.Parse(&cfg.Database); err != nil {
+		return nil, fmt.Errorf("failed to parse database config from env: %w", err)
+	}
+
+{{- if .HasAuth}}
+	if err := env.Parse(&cfg.Auth); err != nil {
+		return nil, fmt.Errorf("failed to parse auth config from env: %w", err)
+	}
+{{- end}}
+
+{{- if .HasMetrics}}
+	if err := env.Parse(&cfg.Metrics); err != nil {
+		return nil, fmt.Errorf("failed to parse metrics config from env: %w", err)
+	}
+{{- end}}
+
+	// Load secrets from environment (required)
+	if err := env.Parse(&cfg.Secrets); err != nil {
+		return nil, fmt.Errorf("failed to parse secrets from env: %w", err)
+	}
+
+	// Set reflection based on environment
+	if cfg.Server.Environment == "production" {
+		cfg.Server.EnableReflection = false
+	}
+
+	return cfg, nil
+}
+
+// LoadFromEnv loads configuration only from environment variables (no YAML file)
+func LoadFromEnv() (*Config, error) {
+	return Load("")
+}
+

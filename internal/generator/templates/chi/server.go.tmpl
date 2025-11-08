@@ -1,0 +1,175 @@
+package api
+
+import (
+	"log/slog"
+	"net/http"
+	"time"
+
+	"{{.ModulePath}}/internal/config"
+	"{{.ModulePath}}/internal/metrics"
+{{- if .HasPostHog}}
+	"{{.ModulePath}}/internal/posthog"
+{{- end}}
+	"{{.ModulePath}}/internal/posts"
+{{- if .HasDynamoDB}}
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+{{- end}}
+{{- if .HasPostgres}}
+	"github.com/jackc/pgx/v5/pgxpool"
+{{- end}}
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+type Server struct {
+	router chi.Router
+	config *config.Config
+{{- if .HasPostHog}}
+	posthog posthog.Client
+{{- end}}
+{{- if .HasDynamoDB}}
+	dynamoDB *dynamodb.Client
+{{- end}}
+{{- if .HasPostgres}}
+	pgPool *pgxpool.Pool
+{{- end}}
+}
+
+// requestLoggingMiddleware logs HTTP requests with request ID
+func requestLoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		
+		// Get request ID from context (set by chi's RequestID middleware)
+		requestID := middleware.GetReqID(r.Context())
+		
+		// Add request ID to response headers
+		w.Header().Set("X-Request-ID", requestID)
+		
+		slog.InfoContext(r.Context(), "HTTP request started",
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote_addr", r.RemoteAddr,
+		)
+
+		// Wrap response writer to capture status code
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		
+		next.ServeHTTP(ww, r)
+		
+		duration := time.Since(start)
+		status := ww.Status()
+		
+		if status >= 400 {
+			slog.ErrorContext(r.Context(), "HTTP request failed",
+				"request_id", requestID,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"duration_ms", duration.Milliseconds(),
+			)
+		} else {
+			slog.InfoContext(r.Context(), "HTTP request completed",
+				"request_id", requestID,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"duration_ms", duration.Milliseconds(),
+			)
+		}
+	})
+}
+
+// recoverWithMetrics wraps chi's Recoverer and emits metrics when panics are recovered
+func recoverWithMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if p := recover(); p != nil {
+				// Increment panic recovery metric
+				metrics.PanicsRecovered.WithLabelValues(r.URL.Path).Inc()
+				requestID := middleware.GetReqID(r.Context())
+				slog.ErrorContext(r.Context(), "panic recovered",
+					"request_id", requestID,
+					"panic", p,
+					"path", r.URL.Path,
+				)
+				// Let chi's Recoverer handle the actual recovery and response
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func New(cfg *config.Config,
+{{- if .HasDynamoDB}}
+	dynamoDB *dynamodb.Client,
+{{- end}}
+{{- if .HasPostgres}}
+	pgPool *pgxpool.Pool,
+{{- end}}
+{{- if .HasPostHog}}
+	posthogClient posthog.Client,
+{{- end}}
+	postsService posts.Service) *Server {
+{{- if .HasPostHog}}
+	// Validate PostHog client is not nil
+	if posthogClient == nil {
+		panic("PostHog client must not be nil when PostHog is enabled")
+	}
+{{- end}}
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.RequestID) // Must be first to ensure request ID is available for logging
+	r.Use(requestLoggingMiddleware) // Request logging with request ID
+	r.Use(middleware.Logger)
+	r.Use(recoverWithMetrics) // Custom recovery middleware that emits metrics
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Compress(5)) // Enable gzip/deflate compression (level 5 is a good balance)
+
+	// Health check
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	// Metrics endpoint
+	r.Handle("/metrics", promhttp.Handler())
+
+	// API routes
+	r.Route("/api/v1", func(r chi.Router) {
+		// Health check
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"healthy"}`))
+		})
+
+		// Posts routes
+{{- if .HasPostHog}}
+		posts.RegisterRoutes(postsService, posthogClient, r)
+{{- else}}
+		posts.RegisterRoutes(postsService, r)
+{{- end}}
+	})
+
+	return &Server{
+		router: r,
+		config: cfg,
+{{- if .HasPostHog}}
+		posthog: posthogClient,
+{{- end}}
+{{- if .HasDynamoDB}}
+		dynamoDB: dynamoDB,
+{{- end}}
+{{- if .HasPostgres}}
+		pgPool: pgPool,
+{{- end}}
+	}
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
+}
+

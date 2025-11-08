@@ -1,0 +1,331 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"text/tabwriter"
+
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+)
+
+var postsCmd = &cobra.Command{
+	Use:   "posts",
+	Short: "Manage posts",
+	Long:  `Create, read, update, and delete posts.`,
+}
+
+var createPostCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a new post",
+	Long:  `Create a new post with the specified title and content.`,
+	RunE:  createPost,
+}
+
+var listPostsCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List posts",
+	Long:  `List all posts for a user.`,
+	RunE:  listPosts,
+}
+
+var getPostCmd = &cobra.Command{
+	Use:   "get [slug]",
+	Short: "Get a post by slug",
+	Long:  `Retrieve a post by its slug.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  getPost,
+}
+
+var updatePostCmd = &cobra.Command{
+	Use:   "update [slug]",
+	Short: "Update a post",
+	Long:  `Update a post's title and/or content.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  updatePost,
+}
+
+var deletePostCmd = &cobra.Command{
+	Use:   "delete [slug]",
+	Short: "Delete a post",
+	Long:  `Delete a post by its slug.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  deletePost,
+}
+
+func init() {
+	rootCmd.AddCommand(postsCmd)
+	postsCmd.AddCommand(createPostCmd)
+	postsCmd.AddCommand(listPostsCmd)
+	postsCmd.AddCommand(getPostCmd)
+	postsCmd.AddCommand(updatePostCmd)
+	postsCmd.AddCommand(deletePostCmd)
+
+	// Create flags
+	createPostCmd.Flags().StringP("title", "t", "", "Post title (required)")
+	createPostCmd.Flags().StringP("content", "c", "", "Post content")
+	createPostCmd.MarkFlagRequired("title")
+
+	// Update flags
+	updatePostCmd.Flags().StringP("title", "t", "", "New title")
+	updatePostCmd.Flags().StringP("content", "c", "", "New content")
+}
+
+type Post struct {
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Slug      string `json:"slug"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func createPost(cmd *cobra.Command, args []string) error {
+	title, _ := cmd.Flags().GetString("title")
+	content, _ := cmd.Flags().GetString("content")
+
+	if userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+
+	// Validate user ID
+	if _, err := uuid.Parse(userID); err != nil {
+		return fmt.Errorf("invalid user-id: %w", err)
+	}
+
+	payload := map[string]string{
+		"title":   title,
+		"content": content,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", endpoint+"/api/v1/posts", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", userID)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to create post: %s - %s", resp.Status, string(body))
+	}
+
+	var post Post
+	d := json.NewDecoder(resp.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&post); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Printf("✓ Post created successfully!\n")
+	fmt.Printf("  ID:      %s\n", post.ID)
+	fmt.Printf("  Slug:    %s\n", post.Slug)
+	fmt.Printf("  Title:   %s\n", post.Title)
+	fmt.Printf("  Content: %s\n", post.Content)
+
+	return nil
+}
+
+func listPosts(cmd *cobra.Command, args []string) error {
+	if userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+
+	// Validate user ID
+	if _, err := uuid.Parse(userID); err != nil {
+		return fmt.Errorf("invalid user-id: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/posts?user_id=%s", endpoint, userID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to list posts: %s - %s", resp.Status, string(body))
+	}
+
+	var posts []Post
+	d := json.NewDecoder(resp.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&posts); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(posts) == 0 {
+		fmt.Println("No posts found.")
+		return nil
+	}
+
+	// Print in table format
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "SLUG\tTITLE\tCREATED")
+	for _, post := range posts {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", post.Slug, post.Title, post.CreatedAt)
+	}
+	w.Flush()
+
+	fmt.Printf("\nTotal: %d posts\n", len(posts))
+	return nil
+}
+
+func getPost(cmd *cobra.Command, args []string) error {
+	slug := args[0]
+
+	// Validate slug
+	if _, err := uuid.Parse(slug); err != nil {
+		return fmt.Errorf("invalid slug: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/posts/%s", endpoint, slug)
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("post not found")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to get post: %s - %s", resp.Status, string(body))
+	}
+
+	var post Post
+	d := json.NewDecoder(resp.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&post); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Printf("ID:         %s\n", post.ID)
+	fmt.Printf("User ID:    %s\n", post.UserID)
+	fmt.Printf("Slug:       %s\n", post.Slug)
+	fmt.Printf("Title:      %s\n", post.Title)
+	fmt.Printf("Content:    %s\n", post.Content)
+	fmt.Printf("Created At: %s\n", post.CreatedAt)
+	fmt.Printf("Updated At: %s\n", post.UpdatedAt)
+
+	return nil
+}
+
+func updatePost(cmd *cobra.Command, args []string) error {
+	slug := args[0]
+	title, _ := cmd.Flags().GetString("title")
+	content, _ := cmd.Flags().GetString("content")
+
+	if title == "" && content == "" {
+		return fmt.Errorf("at least one of --title or --content must be provided")
+	}
+
+	// Validate slug
+	if _, err := uuid.Parse(slug); err != nil {
+		return fmt.Errorf("invalid slug: %w", err)
+	}
+
+	payload := make(map[string]string)
+	if title != "" {
+		payload["title"] = title
+	}
+	if content != "" {
+		payload["content"] = content
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/posts/%s", endpoint, slug)
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("post not found")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update post: %s - %s", resp.Status, string(body))
+	}
+
+	var post Post
+	d := json.NewDecoder(resp.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&post); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	fmt.Printf("✓ Post updated successfully!\n")
+	fmt.Printf("  Slug:    %s\n", post.Slug)
+	fmt.Printf("  Title:   %s\n", post.Title)
+	fmt.Printf("  Content: %s\n", post.Content)
+
+	return nil
+}
+
+func deletePost(cmd *cobra.Command, args []string) error {
+	slug := args[0]
+
+	// Validate slug
+	if _, err := uuid.Parse(slug); err != nil {
+		return fmt.Errorf("invalid slug: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/posts/%s", endpoint, slug)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("post not found")
+	}
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete post: %s - %s", resp.Status, string(body))
+	}
+
+	fmt.Printf("✓ Post deleted successfully!\n")
+	return nil
+}
+
