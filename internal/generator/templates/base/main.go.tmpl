@@ -19,9 +19,6 @@ import (
 	"{{.ModulePath}}/internal/posthog"
 {{- end}}
 	"{{.ModulePath}}/internal/posts"
-{{- if .HasDynamoDB}}
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-{{- end}}
 )
 
 func main() {
@@ -49,7 +46,7 @@ func main() {
 
 	// Initialize posts repository - creates table if it doesn't exist
 	// This ensures the table schema is consistent between tests and production
-	postRepo, err := posts.NewDynamoDBTable(ctx, dynamoClient, cfg.Database.TableName)
+	postRepo, err := posts.NewPostTable(ctx, dynamoClient, cfg.Database.TableName)
 	if err != nil {
 		log.Fatalln("failed to initialize posts repository:", err)
 	}

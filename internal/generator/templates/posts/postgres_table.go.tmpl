@@ -3,13 +3,14 @@ package posts
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostTable implements Repository for PostgreSQL
+// PostTable implements Table for PostgreSQL
 type PostTable struct {
 	pool *pgxpool.Pool
 }
@@ -47,10 +48,38 @@ func (t *PostTable) PutPost(ctx context.Context, post *Post) error {
 		post.UpdatedAt,
 	)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to put post", "error", err, "post_id", post.ID, "user_id", post.UserID)
 		return fmt.Errorf("failed to put post: %w", err)
 	}
 
 	return nil
+}
+
+// GetPostByID retrieves a post by its ID
+func (t *PostTable) GetPostByID(ctx context.Context, postID uuid.UUID) (*Post, error) {
+	query := `
+		SELECT id, user_id, slug, title, content, created_at, updated_at
+		FROM posts
+		WHERE id = $1
+	`
+
+	rows, err := t.pool.Query(ctx, query, postID)
+	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query post", "error", err, "post_id", postID)
+		return nil, fmt.Errorf("failed to query post: %w", err)
+	}
+	defer rows.Close()
+
+	post, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Post])
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrPostNotFound
+		}
+		slog.ErrorContext(ctx, "Table: failed to get post by ID", "error", err, "post_id", postID)
+		return nil, fmt.Errorf("failed to get post by ID: %w", err)
+	}
+
+	return &post, nil
 }
 
 // GetPostBySlug retrieves a post by its slug
@@ -63,6 +92,7 @@ func (t *PostTable) GetPostBySlug(ctx context.Context, slug uuid.UUID) (*Post, e
 
 	rows, err := t.pool.Query(ctx, query, slug)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query post", "error", err, "slug", slug)
 		return nil, fmt.Errorf("failed to query post: %w", err)
 	}
 	defer rows.Close()
@@ -72,6 +102,7 @@ func (t *PostTable) GetPostBySlug(ctx context.Context, slug uuid.UUID) (*Post, e
 		if err == pgx.ErrNoRows {
 			return nil, ErrPostNotFound
 		}
+		slog.ErrorContext(ctx, "Table: failed to get post by slug", "error", err, "slug", slug)
 		return nil, fmt.Errorf("failed to get post by slug: %w", err)
 	}
 
@@ -89,27 +120,30 @@ func (t *PostTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID) ([]
 
 	rows, err := t.pool.Query(ctx, query, userID)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query posts", "error", err, "user_id", userID)
 		return nil, fmt.Errorf("failed to query posts: %w", err)
 	}
 	defer rows.Close()
 
 	posts, err := pgx.CollectRows(rows, pgx.RowToStructByName[Post])
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to scan posts", "error", err, "user_id", userID)
 		return nil, fmt.Errorf("failed to scan posts: %w", err)
 	}
 
 	return posts, nil
 }
 
-// DeletePost removes a post from PostgreSQL by slug
-func (t *PostTable) DeletePost(ctx context.Context, slug uuid.UUID) error {
+// DeletePost removes a post from PostgreSQL by ID
+func (t *PostTable) DeletePost(ctx context.Context, postID uuid.UUID) error {
 	query := `
 		DELETE FROM posts
-		WHERE slug = $1
+		WHERE id = $1
 	`
 
-	result, err := t.pool.Exec(ctx, query, slug)
+	result, err := t.pool.Exec(ctx, query, postID)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to delete post", "error", err, "post_id", postID)
 		return fmt.Errorf("failed to delete post: %w", err)
 	}
 

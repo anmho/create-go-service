@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,34 +15,108 @@ import (
 )
 
 const (
-	TableName = "{{.ProjectName}}-posts"
-	SlugIndex = "SlugIndex"
+	PostIDIndex = "PostIDIndex"
 )
 
-// DynamoDBTable implements Repository for DynamoDB
-type DynamoDBTable struct {
-	client *dynamodb.Client
+var (
+	// ErrUnmarshalFailed is returned when a post cannot be unmarshaled from DynamoDB
+	// This typically indicates a data type mismatch (e.g., UpdatedAt stored as string instead of number)
+	ErrUnmarshalFailed = errors.New("failed to unmarshal post from DynamoDB: data type mismatch")
+)
+
+// PostTable implements Table for DynamoDB
+type PostTable struct {
+	client    *dynamodb.Client
+	tableName string
+}
+
+// verifyTableSchema verifies that the table has the correct schema including all required indexes
+func verifyTableSchema(ctx context.Context, tableDesc *types.TableDescription, tableName string) error {
+	// Verify primary key schema: UserID (hash) + CreatedAt (range)
+	if len(tableDesc.KeySchema) != 2 {
+		return fmt.Errorf("table %s has incorrect primary key schema: expected 2 keys (UserID hash, CreatedAt range), got %d", tableName, len(tableDesc.KeySchema))
+	}
+
+	hasUserIDHash := false
+	hasCreatedAtRange := false
+	for _, key := range tableDesc.KeySchema {
+		if key.AttributeName != nil {
+			if *key.AttributeName == "UserID" && key.KeyType == types.KeyTypeHash {
+				hasUserIDHash = true
+			}
+			if *key.AttributeName == "CreatedAt" && key.KeyType == types.KeyTypeRange {
+				hasCreatedAtRange = true
+			}
+		}
+	}
+	if !hasUserIDHash || !hasCreatedAtRange {
+		return fmt.Errorf("table %s has incorrect primary key schema: expected UserID (hash) and CreatedAt (range)", tableName)
+	}
+
+	// Verify all required GSIs exist
+	expectedGSIs := map[string]struct {
+		hashKey string
+	}{
+		PostIDIndex: {hashKey: "PostID"},
+	}
+
+	foundGSIs := make(map[string]bool)
+	for _, gsi := range tableDesc.GlobalSecondaryIndexes {
+		if gsi.IndexName != nil {
+			indexName := *gsi.IndexName
+			if expected, ok := expectedGSIs[indexName]; ok {
+				// Verify GSI key schema
+				if len(gsi.KeySchema) != 1 {
+					return fmt.Errorf("GSI %s on table %s has incorrect key schema: expected 1 key (hash), got %d", indexName, tableName, len(gsi.KeySchema))
+				}
+				if gsi.KeySchema[0].AttributeName == nil || *gsi.KeySchema[0].AttributeName != expected.hashKey {
+					return fmt.Errorf("GSI %s on table %s has incorrect hash key: expected %s, got %v", indexName, tableName, expected.hashKey, gsi.KeySchema[0].AttributeName)
+				}
+				if gsi.KeySchema[0].KeyType != types.KeyTypeHash {
+					return fmt.Errorf("GSI %s on table %s hash key has incorrect type: expected Hash, got %v", indexName, tableName, gsi.KeySchema[0].KeyType)
+				}
+				foundGSIs[indexName] = true
+			}
+		}
+	}
+
+	// Check for missing GSIs
+	for indexName := range expectedGSIs {
+		if !foundGSIs[indexName] {
+			slog.ErrorContext(ctx, "Table exists but missing required GSI", "table_name", tableName, "index_name", indexName)
+			return fmt.Errorf("table %s exists but is missing the required GSI %s. Please delete and recreate the table, or use Terraform to manage the table schema", tableName, indexName)
+		}
+	}
+
+	return nil
 }
 
 // CreateTableIfNotExists creates the DynamoDB table if it doesn't exist
 // This ensures the table schema is consistent between tests and production
 func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableName string) error {
 	// Check if table exists
-	_, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+	tableDesc, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(tableName),
 	})
 	if err == nil {
-		// Table exists, nothing to do
+		// Table exists, verify it has the correct schema including all required indexes
+		if err := verifyTableSchema(ctx, tableDesc.Table, tableName); err != nil {
+			return err
+		}
+		// Table exists with correct schema, nothing to do
 		return nil
 	}
 
 	// Check if error is because table doesn't exist
 	var resourceNotFound *types.ResourceNotFoundException
 	if err != nil && !errors.As(err, &resourceNotFound) {
+		slog.ErrorContext(ctx, "Table: failed to check if table exists", "error", err, "table_name", tableName)
 		return fmt.Errorf("failed to check if table exists: %w", err)
 	}
 
 	// Create table
+	// Primary key: UserID (hash) + CreatedAt (range) - CreatedAt is epoch millis for sorting
+	// GSI: PostIDIndex for public lookups by PostID (UUID)
 	_, err = client.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(tableName),
 		AttributeDefinitions: []types.AttributeDefinition{
@@ -50,11 +125,11 @@ func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableN
 				AttributeType: types.ScalarAttributeTypeS,
 			},
 			{
-				AttributeName: aws.String("PostID"),
-				AttributeType: types.ScalarAttributeTypeS,
+				AttributeName: aws.String("CreatedAt"),
+				AttributeType: types.ScalarAttributeTypeN,
 			},
 			{
-				AttributeName: aws.String("Slug"),
+				AttributeName: aws.String("PostID"),
 				AttributeType: types.ScalarAttributeTypeS,
 			},
 		},
@@ -64,16 +139,16 @@ func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableN
 				KeyType:       types.KeyTypeHash,
 			},
 			{
-				AttributeName: aws.String("PostID"),
+				AttributeName: aws.String("CreatedAt"),
 				KeyType:       types.KeyTypeRange,
 			},
 		},
 		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
 			{
-				IndexName: aws.String("SlugIndex"),
+				IndexName: aws.String("PostIDIndex"),
 				KeySchema: []types.KeySchemaElement{
 					{
-						AttributeName: aws.String("Slug"),
+						AttributeName: aws.String("PostID"),
 						KeyType:       types.KeyTypeHash,
 					},
 				},
@@ -85,6 +160,7 @@ func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableN
 		BillingMode: types.BillingModePayPerRequest,
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to create table", "error", err, "table_name", tableName)
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 
@@ -94,79 +170,155 @@ func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableN
 		TableName: aws.String(tableName),
 	}, 30*time.Second)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to wait for table to be active", "error", err, "table_name", tableName)
 		return fmt.Errorf("failed to wait for table to be active: %w", err)
 	}
 
+	// Wait for all GSIs to be active
+	// GSIs can take time to become active after table creation
+	for _, gsi := range []string{PostIDIndex} {
+		// Poll until GSI is active
+		maxAttempts := 30
+		for i := 0; i < maxAttempts; i++ {
+			desc, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+				TableName: aws.String(tableName),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to describe table while waiting for GSI: %w", err)
+			}
+
+			gsiActive := false
+			for _, gsiDesc := range desc.Table.GlobalSecondaryIndexes {
+				if gsiDesc.IndexName != nil && *gsiDesc.IndexName == gsi {
+					if gsiDesc.IndexStatus == types.IndexStatusActive {
+						gsiActive = true
+						break
+					}
+				}
+			}
+
+			if gsiActive {
+				break
+			}
+
+			if i == maxAttempts-1 {
+				slog.WarnContext(ctx, "GSI not active after waiting", "table_name", tableName, "index_name", gsi)
+				return fmt.Errorf("GSI %s on table %s did not become active within timeout", gsi, tableName)
+			}
+
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	// Verify the created table has the correct schema
+	createdDesc, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to describe created table: %w", err)
+	}
+
+	if err := verifyTableSchema(ctx, createdDesc.Table, tableName); err != nil {
+		return fmt.Errorf("created table does not have correct schema: %w", err)
+	}
+
+	slog.InfoContext(ctx, "Table created successfully with all indexes", "table_name", tableName)
 	return nil
 }
 
-// NewDynamoDBTable creates a new DynamoDB repository for posts
+// NewPostTable creates a new DynamoDB repository for posts
 // It creates the table if it doesn't exist to ensure consistency with tests
-func NewDynamoDBTable(ctx context.Context, client *dynamodb.Client, tableName string) (*DynamoDBTable, error) {
+func NewPostTable(ctx context.Context, client *dynamodb.Client, tableName string) (*PostTable, error) {
 	// Create table if it doesn't exist
 	if err := CreateTableIfNotExists(ctx, client, tableName); err != nil {
 		return nil, fmt.Errorf("failed to ensure table exists: %w", err)
 	}
 
-	return &DynamoDBTable{
-		client: client,
+	return &PostTable{
+		client:    client,
+		tableName: tableName,
 	}, nil
 }
 
+// PostStorageModel represents the DynamoDB storage format for a Post
+type PostStorageModel struct {
+	UserID    string `dynamodbav:"UserID"`
+	CreatedAt int64  `dynamodbav:"CreatedAt"`
+	PostID    string `dynamodbav:"PostID"`
+	Title     string `dynamodbav:"Title"`
+	Content   string `dynamodbav:"Content"`
+	UpdatedAt int64  `dynamodbav:"UpdatedAt"`
+}
+
 // PutPost saves a post to DynamoDB
-func (t *DynamoDBTable) PutPost(ctx context.Context, post *Post) error {
-	item, err := attributevalue.MarshalMap(post)
+func (t *PostTable) PutPost(ctx context.Context, post *Post) error {
+	// Convert Post to PostStorageModel
+	storage := PostToStorage(post)
+
+	// Marshal PostStorageModel directly to DynamoDB item
+	item, err := attributevalue.MarshalMap(storage)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to marshal post", "error", err, "post_id", post.ID, "post_id_string", post.ID.String(), "user_id", post.UserID)
 		return fmt.Errorf("failed to marshal post: %w", err)
 	}
 
 	_, err = t.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(TableName),
+		TableName: aws.String(t.tableName),
 		Item:      item,
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to put post", "error", err, "post_id", post.ID, "post_id_string", post.ID.String(), "user_id", post.UserID, "table_name", t.tableName, "storage_post_id", storage.PostID)
 		return fmt.Errorf("failed to put post: %w", err)
 	}
 
+	slog.DebugContext(ctx, "Table: successfully put post", "post_id", post.ID, "post_id_string", post.ID.String(), "storage_post_id", storage.PostID, "table_name", t.tableName)
 	return nil
 }
 
-// GetPostBySlug retrieves a post by its slug using GSI
-func (t *DynamoDBTable) GetPostBySlug(ctx context.Context, slug uuid.UUID) (*Post, error) {
+// GetPostByID retrieves a post by its ID using GSI
+func (t *PostTable) GetPostByID(ctx context.Context, postID uuid.UUID) (*Post, error) {
 	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(TableName),
-		IndexName:              aws.String(SlugIndex),
-		KeyConditionExpression: aws.String("Slug = :slug"),
+		TableName:              aws.String(t.tableName),
+		IndexName:              aws.String(PostIDIndex),
+		KeyConditionExpression: aws.String("#PostID = :postID"),
+		ExpressionAttributeNames: map[string]string{
+			"#PostID": "PostID",
+		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":slug": &types.AttributeValueMemberS{Value: slug.String()},
+			":postID": &types.AttributeValueMemberS{Value: postID.String()},
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to query post by slug: %w", err)
+		slog.ErrorContext(ctx, "Table: failed to query post by ID", "error", err, "post_id", postID, "post_id_string", postID.String(), "table_name", t.tableName, "index_name", PostIDIndex)
+		return nil, fmt.Errorf("failed to query post by ID: %w", err)
 	}
 
 	if len(result.Items) == 0 {
+		slog.WarnContext(ctx, "Table: post not found by ID", "post_id", postID, "post_id_string", postID.String(), "table_name", t.tableName, "index_name", PostIDIndex)
 		return nil, ErrPostNotFound
 	}
 
 	post, err := t.unmarshalPost(result.Items[0])
 	if err != nil {
-		return nil, err
+		slog.ErrorContext(ctx, "Table: failed to unmarshal post", "error", err, "post_id", postID, "post_id_string", postID.String(), "table_name", t.tableName, "index_name", PostIDIndex, "item_found", true)
+		// Return specific error for unmarshaling failures to distinguish from "not found"
+		return nil, fmt.Errorf("%w: %v", ErrUnmarshalFailed, err)
 	}
 
 	return post, nil
 }
 
 // ListPostsByUserID retrieves all posts for a user
-func (t *DynamoDBTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID) ([]Post, error) {
+func (t *PostTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID) ([]Post, error) {
 	result, err := t.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(TableName),
+		TableName:              aws.String(t.tableName),
 		KeyConditionExpression: aws.String("UserID = :userID"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":userID": &types.AttributeValueMemberS{Value: userID.String()},
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query posts", "error", err, "user_id", userID, "table_name", t.tableName)
 		return nil, fmt.Errorf("failed to query posts: %w", err)
 	}
 
@@ -174,7 +326,9 @@ func (t *DynamoDBTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID)
 	for _, item := range result.Items {
 		post, err := t.unmarshalPost(item)
 		if err != nil {
-			return nil, err
+			slog.ErrorContext(ctx, "Table: failed to unmarshal post in list", "error", err, "user_id", userID, "table_name", t.tableName)
+			// Return specific error for unmarshaling failures to distinguish from other errors
+			return nil, fmt.Errorf("%w: %v", ErrUnmarshalFailed, err)
 		}
 		posts = append(posts, *post)
 	}
@@ -182,22 +336,23 @@ func (t *DynamoDBTable) ListPostsByUserID(ctx context.Context, userID uuid.UUID)
 	return posts, nil
 }
 
-// DeletePost removes a post from DynamoDB by slug
-func (t *DynamoDBTable) DeletePost(ctx context.Context, slug uuid.UUID) error {
-	// First, get the post to find its UserID and PostID (composite key)
-	post, err := t.GetPostBySlug(ctx, slug)
+// DeletePost removes a post from DynamoDB by ID
+func (t *PostTable) DeletePost(ctx context.Context, postID uuid.UUID) error {
+	// First, get the post to find its UserID and CreatedAt (composite key: UserID + CreatedAt)
+	post, err := t.GetPostByID(ctx, postID)
 	if err != nil {
 		return err
 	}
 
 	_, err = t.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(TableName),
+		TableName: aws.String(t.tableName),
 		Key: map[string]types.AttributeValue{
-			"UserID": &types.AttributeValueMemberS{Value: post.UserID.String()},
-			"PostID": &types.AttributeValueMemberS{Value: post.ID.String()},
+			"UserID":    &types.AttributeValueMemberS{Value: post.UserID.String()},
+			"CreatedAt": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", post.CreatedAt.UnixMilli())},
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to delete post", "error", err, "post_id", postID, "user_id", post.UserID, "table_name", t.tableName)
 		return fmt.Errorf("failed to delete post: %w", err)
 	}
 
@@ -205,11 +360,15 @@ func (t *DynamoDBTable) DeletePost(ctx context.Context, slug uuid.UUID) error {
 }
 
 // unmarshalPost converts a DynamoDB item to a Post struct
-func (t *DynamoDBTable) unmarshalPost(item map[string]types.AttributeValue) (*Post, error) {
-	var post Post
-	if err := attributevalue.UnmarshalMap(item, &post); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
+func (t *PostTable) unmarshalPost(item map[string]types.AttributeValue) (*Post, error) {
+	// Unmarshal directly to PostStorageModel
+	var storage PostStorageModel
+	if err := attributevalue.UnmarshalMap(item, &storage); err != nil {
+		// Return detailed error about type mismatch to help diagnose the issue
+		return nil, fmt.Errorf("unmarshal failed - likely data type mismatch (e.g., UpdatedAt as string vs number): %w", err)
 	}
-	return &post, nil
+
+	// Convert PostStorageModel to Post
+	return StorageToPost(&storage)
 }
 
