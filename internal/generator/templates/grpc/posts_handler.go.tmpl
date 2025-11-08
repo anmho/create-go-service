@@ -7,21 +7,20 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"{{.ModulePath}}/internal/posts"
 	postsv1 "{{.ModulePath}}/protos/gen/posts/v1"
-	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1"
+	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1/postsv1connect"
 )
 
 // PostServiceHandler implements the gRPC PostService
 type PostServiceHandler struct {
 	postsv1connect.UnimplementedPostServiceHandler
-	service *posts.Service
+	service posts.Service
 }
 
 // NewPostServiceHandler creates a new gRPC handler for posts
-func NewPostServiceHandler(service *posts.Service) *PostServiceHandler {
+func NewPostServiceHandler(service posts.Service) *PostServiceHandler {
 	return &PostServiceHandler{
 		service: service,
 	}
@@ -34,21 +33,26 @@ func (h *PostServiceHandler) CreatePost(
 ) (*connect.Response[postsv1.CreatePostResponse], error) {
 	// Validate request
 	if req.Msg.UserId == "" {
+		slog.ErrorContext(ctx, "Validation error: user_id is required")
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("user_id is required"))
 	}
 	if req.Msg.Title == "" {
+		slog.ErrorContext(ctx, "Validation error: title is required", "user_id", req.Msg.UserId)
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title is required"))
 	}
 	if len(req.Msg.Title) > 200 {
+		slog.ErrorContext(ctx, "Validation error: title too long", "user_id", req.Msg.UserId, "length", len(req.Msg.Title))
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title must be 200 characters or less"))
 	}
 	if len(req.Msg.Content) > 10000 {
+		slog.ErrorContext(ctx, "Validation error: content too long", "user_id", req.Msg.UserId, "length", len(req.Msg.Content))
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("content must be 10000 characters or less"))
 	}
 
 	// Parse user ID
 	userID, err := uuid.Parse(req.Msg.UserId)
 	if err != nil {
+		slog.ErrorContext(ctx, "Failed to parse user_id", "error", err, "user_id", req.Msg.UserId)
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid user_id format"))
 	}
 
@@ -60,57 +64,44 @@ func (h *PostServiceHandler) CreatePost(
 	}
 
 	// Convert to proto
-	protoPost := &postsv1.Post{
-		Id:        post.ID.String(),
-		UserId:    post.UserID.String(),
-		Slug:      post.Slug.String(),
-		Title:     post.Title,
-		Content:   post.Content,
-		CreatedAt: timestamppb.New(post.CreatedAt),
-		UpdatedAt: timestamppb.New(post.UpdatedAt),
-	}
+	protoPost := posts.PostToProto(post)
 
 	return connect.NewResponse(&postsv1.CreatePostResponse{
 		Post: protoPost,
 	}), nil
 }
 
-// GetPost retrieves a post by slug
+// GetPost retrieves a post by ID
 func (h *PostServiceHandler) GetPost(
 	ctx context.Context,
 	req *connect.Request[postsv1.GetPostRequest],
 ) (*connect.Response[postsv1.GetPostResponse], error) {
 	// Validate request
-	if req.Msg.Slug == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	if req.Msg.PostId == "" {
+		slog.ErrorContext(ctx, "Validation error: post_id is required")
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("post_id is required"))
 	}
 
-	// Parse slug
-	slug, err := uuid.Parse(req.Msg.Slug)
+	// Parse post ID
+	postID, err := uuid.Parse(req.Msg.PostId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+		slog.ErrorContext(ctx, "Failed to parse post_id", "error", err, "post_id", req.Msg.PostId)
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid post_id format"))
 	}
 
 	// Get post
-	post, err := h.service.GetPost(ctx, slug)
+	post, err := h.service.GetPost(ctx, postID)
 	if err != nil {
 		if errors.Is(err, posts.ErrPostNotFound) {
+			slog.WarnContext(ctx, "Post not found", "post_id", postID)
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
 		}
-		slog.ErrorContext(ctx, "Failed to get post", "error", err, "slug", slug)
+		slog.ErrorContext(ctx, "Failed to get post", "error", err, "post_id", postID)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to get post"))
 	}
 
 	// Convert to proto
-	protoPost := &postsv1.Post{
-		Id:        post.ID.String(),
-		UserId:    post.UserID.String(),
-		Slug:      post.Slug.String(),
-		Title:     post.Title,
-		Content:   post.Content,
-		CreatedAt: timestamppb.New(post.CreatedAt),
-		UpdatedAt: timestamppb.New(post.UpdatedAt),
-	}
+	protoPost := posts.PostToProto(post)
 
 	return connect.NewResponse(&postsv1.GetPostResponse{
 		Post: protoPost,
@@ -124,12 +115,14 @@ func (h *PostServiceHandler) ListPosts(
 ) (*connect.Response[postsv1.ListPostsResponse], error) {
 	// Validate request
 	if req.Msg.UserId == "" {
+		slog.ErrorContext(ctx, "Validation error: user_id is required")
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("user_id is required"))
 	}
 
 	// Parse user ID
 	userID, err := uuid.Parse(req.Msg.UserId)
 	if err != nil {
+		slog.ErrorContext(ctx, "Failed to parse user_id", "error", err, "user_id", req.Msg.UserId)
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid user_id format"))
 	}
 
@@ -142,16 +135,8 @@ func (h *PostServiceHandler) ListPosts(
 
 	// Convert to proto
 	protoPosts := make([]*postsv1.Post, 0, len(postsList))
-	for _, post := range postsList {
-		protoPosts = append(protoPosts, &postsv1.Post{
-			Id:        post.ID.String(),
-			UserId:    post.UserID.String(),
-			Slug:      post.Slug.String(),
-			Title:     post.Title,
-			Content:   post.Content,
-			CreatedAt: timestamppb.New(post.CreatedAt),
-			UpdatedAt: timestamppb.New(post.UpdatedAt),
-		})
+	for i := range postsList {
+		protoPosts = append(protoPosts, posts.PostToProto(&postsList[i]))
 	}
 
 	return connect.NewResponse(&postsv1.ListPostsResponse{
@@ -165,27 +150,32 @@ func (h *PostServiceHandler) UpdatePost(
 	req *connect.Request[postsv1.UpdatePostRequest],
 ) (*connect.Response[postsv1.UpdatePostResponse], error) {
 	// Validate request
-	if req.Msg.Slug == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	if req.Msg.PostId == "" {
+		slog.ErrorContext(ctx, "Validation error: post_id is required")
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("post_id is required"))
 	}
 
 	// Validate at least one field is being updated
 	if req.Msg.Title == nil && req.Msg.Content == nil {
+		slog.ErrorContext(ctx, "Validation error: at least one field must be updated", "post_id", req.Msg.PostId)
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one field must be updated"))
 	}
 
 	// Validate field lengths
 	if req.Msg.Title != nil && len(*req.Msg.Title) > 200 {
+		slog.ErrorContext(ctx, "Validation error: title too long", "post_id", req.Msg.PostId, "length", len(*req.Msg.Title))
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("title must be 200 characters or less"))
 	}
 	if req.Msg.Content != nil && len(*req.Msg.Content) > 10000 {
+		slog.ErrorContext(ctx, "Validation error: content too long", "post_id", req.Msg.PostId, "length", len(*req.Msg.Content))
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("content must be 10000 characters or less"))
 	}
 
-	// Parse slug
-	slug, err := uuid.Parse(req.Msg.Slug)
+	// Parse post ID
+	postID, err := uuid.Parse(req.Msg.PostId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+		slog.ErrorContext(ctx, "Failed to parse post_id", "error", err, "post_id", req.Msg.PostId)
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid post_id format"))
 	}
 
 	// Prepare update values
@@ -199,54 +189,50 @@ func (h *PostServiceHandler) UpdatePost(
 	}
 
 	// Update post
-	post, err := h.service.UpdatePost(ctx, slug, title, content)
+	post, err := h.service.UpdatePost(ctx, postID, title, content)
 	if err != nil {
 		if errors.Is(err, posts.ErrPostNotFound) {
+			slog.WarnContext(ctx, "Post not found for update", "post_id", postID)
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
 		}
-		slog.ErrorContext(ctx, "Failed to update post", "error", err, "slug", slug)
+		slog.ErrorContext(ctx, "Failed to update post", "error", err, "post_id", postID)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to update post"))
 	}
 
 	// Convert to proto
-	protoPost := &postsv1.Post{
-		Id:        post.ID.String(),
-		UserId:    post.UserID.String(),
-		Slug:      post.Slug.String(),
-		Title:     post.Title,
-		Content:   post.Content,
-		CreatedAt: timestamppb.New(post.CreatedAt),
-		UpdatedAt: timestamppb.New(post.UpdatedAt),
-	}
+	protoPost := posts.PostToProto(post)
 
 	return connect.NewResponse(&postsv1.UpdatePostResponse{
 		Post: protoPost,
 	}), nil
 }
 
-// DeletePost deletes a post by slug
+// DeletePost deletes a post by ID
 func (h *PostServiceHandler) DeletePost(
 	ctx context.Context,
 	req *connect.Request[postsv1.DeletePostRequest],
 ) (*connect.Response[postsv1.DeletePostResponse], error) {
 	// Validate request
-	if req.Msg.Slug == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("slug is required"))
+	if req.Msg.PostId == "" {
+		slog.ErrorContext(ctx, "Validation error: post_id is required")
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("post_id is required"))
 	}
 
-	// Parse slug
-	slug, err := uuid.Parse(req.Msg.Slug)
+	// Parse post ID
+	postID, err := uuid.Parse(req.Msg.PostId)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid slug format"))
+		slog.ErrorContext(ctx, "Failed to parse post_id", "error", err, "post_id", req.Msg.PostId)
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("invalid post_id format"))
 	}
 
 	// Delete post
-	err = h.service.DeletePost(ctx, slug)
+	err = h.service.DeletePost(ctx, postID)
 	if err != nil {
 		if errors.Is(err, posts.ErrPostNotFound) {
+			slog.WarnContext(ctx, "Post not found for delete", "post_id", postID)
 			return nil, connect.NewError(connect.CodeNotFound, errors.New("post not found"))
 		}
-		slog.ErrorContext(ctx, "Failed to delete post", "error", err, "slug", slug)
+		slog.ErrorContext(ctx, "Failed to delete post", "error", err, "post_id", postID)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("failed to delete post"))
 	}
 
