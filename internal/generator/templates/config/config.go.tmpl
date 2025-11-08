@@ -8,6 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var _ = env.Parse // Imported for secrets parsing when needed
+
 // Stage represents the deployment stage/environment
 type Stage string
 
@@ -44,9 +46,7 @@ type Config struct {
 {{- if .HasPostHog}}
 	PostHog  PostHogConfig  `yaml:"posthog"`
 {{- end}}
-{{- if .HasPostgres}}
 	Secrets  SecretsConfig  `yaml:"-"`
-{{- end}}
 }
 
 type ServerConfig struct {
@@ -104,6 +104,10 @@ type SecretsConfig struct {
 {{- else if .HasPostHog}}
 type SecretsConfig struct {
 	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
+}
+{{- else}}
+type SecretsConfig struct {
+	// No secrets required
 }
 {{- end}}
 

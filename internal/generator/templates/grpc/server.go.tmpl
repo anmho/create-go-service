@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -22,7 +23,7 @@ import (
 {{- if .HasPostgres}}
 	"github.com/jackc/pgx/v5/pgxpool"
 {{- end}}
-	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1"
+	postsv1connect "{{.ModulePath}}/protos/gen/posts/v1/postsv1connect"
 )
 
 // Server encapsulates the gRPC server and its dependencies
@@ -35,7 +36,7 @@ type Server struct {
 {{- if .HasPostgres}}
 	pgPool      *pgxpool.Pool
 {{- end}}
-	postService *posts.Service
+	postService posts.Service
 }
 
 // New creates a new gRPC server with all dependencies wired up
@@ -47,7 +48,7 @@ func New(
 {{- if .HasPostgres}}
 	pgPool *pgxpool.Pool,
 {{- end}}
-	postService *posts.Service,
+	postService posts.Service,
 ) *Server {
 	s := &Server{
 		config:      cfg,
@@ -79,7 +80,14 @@ func (s *Server) registerServices() {
 		// Recovery interceptor (catches panics and converts to gRPC errors)
 		unaryInterceptor(recoveryMiddleware),
 		// OpenTelemetry instrumentation (if metrics are enabled)
-		otelconnect.NewInterceptor(),
+		func() connect.Interceptor {
+			interceptor, err := otelconnect.NewInterceptor()
+			if err != nil {
+				slog.Error("Failed to create OpenTelemetry interceptor", "error", err)
+				panic(fmt.Sprintf("failed to create OpenTelemetry interceptor: %v", err))
+			}
+			return interceptor
+		}(),
 	)
 
 	// Register PostService
@@ -169,8 +177,8 @@ func requestIDMiddleware(next connect.UnaryFunc) connect.UnaryFunc {
 		// Call next handler
 		resp, err := next(ctx, req)
 
-		// Add request ID to response headers
-		if resp != nil {
+		// Add request ID to response headers (only if response is valid)
+		if resp != nil && err == nil {
 			resp.Header().Set("X-Request-ID", requestID)
 		}
 
@@ -236,8 +244,9 @@ func recoveryMiddleware(next connect.UnaryFunc) connect.UnaryFunc {
 				slog.ErrorContext(ctx, "Panic recovered in gRPC handler",
 					"procedure", req.Spec().Procedure,
 					"panic", r,
+					"error", fmt.Errorf("panic: %v", r),
 				)
-				err = connect.NewError(connect.CodeInternal, connect.NewError(connect.CodeInternal, nil))
+				err = connect.NewError(connect.CodeInternal, fmt.Errorf("internal server error: panic recovered"))
 			}
 		}()
 		return next(ctx, req)

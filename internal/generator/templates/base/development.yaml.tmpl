@@ -8,7 +8,7 @@ server:
 database:
 {{- if .HasDynamoDB}}
   aws_region: "us-east-1"
-  table_name: "{{.ProjectName}}-dev"
+  table_name: "{{.ProjectName}}-posts-dev"
   endpoint_url: ""  # Uses default AWS SDK configuration (IAM roles when running on AWS infrastructure)
 {{- end}}
 {{- if .HasPostgres}}

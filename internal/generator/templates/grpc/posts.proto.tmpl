@@ -11,7 +11,7 @@ service PostService {
   // CreatePost creates a new post
   rpc CreatePost(CreatePostRequest) returns (CreatePostResponse) {}
   
-  // GetPost retrieves a post by its slug
+  // GetPost retrieves a post by its ID
   rpc GetPost(GetPostRequest) returns (GetPostResponse) {}
   
   // ListPosts retrieves all posts for a user
@@ -20,32 +20,29 @@ service PostService {
   // UpdatePost updates an existing post
   rpc UpdatePost(UpdatePostRequest) returns (UpdatePostResponse) {}
   
-  // DeletePost deletes a post by its slug
+  // DeletePost deletes a post by its ID
   rpc DeletePost(DeletePostRequest) returns (DeletePostResponse) {}
 }
 
 // Post represents a blog post or content item
 message Post {
-  // Unique identifier for the post
+  // Unique identifier for the post (snowflake ID for DynamoDB, UUID for PostgreSQL)
   string id = 1;
   
   // User ID who owns this post
   string user_id = 2;
   
-  // Public slug for URL routing (UUID)
-  string slug = 3;
-  
   // Post title (max 200 characters)
-  string title = 4;
+  string title = 3;
   
   // Post content (max 10000 characters)
-  string content = 5;
+  string content = 4;
   
   // Timestamp when the post was created
-  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp created_at = 5;
   
   // Timestamp when the post was last updated
-  google.protobuf.Timestamp updated_at = 7;
+  google.protobuf.Timestamp updated_at = 6;
 }
 
 // CreatePostRequest contains data for creating a new post
@@ -65,10 +62,10 @@ message CreatePostResponse {
   Post post = 1;
 }
 
-// GetPostRequest identifies a post by its slug
+// GetPostRequest identifies a post by its ID
 message GetPostRequest {
-  // Post slug (UUID, required)
-  string slug = 1;
+  // Post ID (snowflake ID for DynamoDB, UUID for PostgreSQL, required)
+  string post_id = 1;
 }
 
 // GetPostResponse returns the requested post
@@ -99,8 +96,8 @@ message ListPostsResponse {
 
 // UpdatePostRequest updates an existing post
 message UpdatePostRequest {
-  // Post slug to update (UUID, required)
-  string slug = 1;
+  // Post ID to update (snowflake ID for DynamoDB, UUID for PostgreSQL, required)
+  string post_id = 1;
   
   // New title (optional, max 200 characters)
   optional string title = 2;
@@ -116,8 +113,8 @@ message UpdatePostResponse {
 
 // DeletePostRequest identifies a post to delete
 message DeletePostRequest {
-  // Post slug to delete (UUID, required)
-  string slug = 1;
+  // Post ID to delete (snowflake ID for DynamoDB, UUID for PostgreSQL, required)
+  string post_id = 1;
 }
 
 // DeletePostResponse confirms deletion

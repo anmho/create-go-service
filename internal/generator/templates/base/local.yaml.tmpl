@@ -9,7 +9,7 @@ server:
 database:
 {{- if .HasDynamoDB}}
   aws_region: "us-east-1"
-  table_name: "{{.ProjectName}}"
+  table_name: "{{.ProjectName}}-posts"
   endpoint_url: "http://localhost:8000"  # For local DynamoDB Local
 {{- end}}
 {{- if .HasPostgres}}
