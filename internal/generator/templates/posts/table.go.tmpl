@@ -3,6 +3,7 @@ package posts
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -29,6 +30,7 @@ func NewTable(ctx context.Context, client *dynamodb.Client) (*Table, error) {
 		TableName: aws.String(TableName),
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to connect to DynamoDB table", "error", err, "table_name", TableName)
 		return nil, fmt.Errorf("failed to connect to DynamoDB table %s: %w", TableName, err)
 	}
 
@@ -41,6 +43,7 @@ func NewTable(ctx context.Context, client *dynamodb.Client) (*Table, error) {
 func (t *Table) Put(ctx context.Context, post *Post) error {
 	item, err := attributevalue.MarshalMap(post)
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to marshal post", "error", err, "post_id", post.ID, "user_id", post.UserID)
 		return fmt.Errorf("failed to marshal post: %w", err)
 	}
 
@@ -49,6 +52,7 @@ func (t *Table) Put(ctx context.Context, post *Post) error {
 		Item:      item,
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to put post", "error", err, "post_id", post.ID, "user_id", post.UserID, "table_name", TableName)
 		return fmt.Errorf("failed to put post: %w", err)
 	}
 
@@ -65,6 +69,7 @@ func (t *Table) Get(ctx context.Context, userID, postID uuid.UUID) (*Post, error
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to get post", "error", err, "user_id", userID, "post_id", postID, "table_name", TableName)
 		return nil, fmt.Errorf("failed to get post: %w", err)
 	}
 
@@ -74,6 +79,7 @@ func (t *Table) Get(ctx context.Context, userID, postID uuid.UUID) (*Post, error
 
 	var post Post
 	if err := attributevalue.UnmarshalMap(result.Item, &post); err != nil {
+		slog.ErrorContext(ctx, "Table: failed to unmarshal post", "error", err, "user_id", userID, "post_id", postID)
 		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
 	}
 
@@ -91,6 +97,7 @@ func (t *Table) GetBySlug(ctx context.Context, slug uuid.UUID) (*Post, error) {
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query post by slug", "error", err, "slug", slug, "table_name", TableName, "index_name", SlugIndex)
 		return nil, fmt.Errorf("failed to query post by slug: %w", err)
 	}
 
@@ -100,6 +107,7 @@ func (t *Table) GetBySlug(ctx context.Context, slug uuid.UUID) (*Post, error) {
 
 	var post Post
 	if err := attributevalue.UnmarshalMap(result.Items[0], &post); err != nil {
+		slog.ErrorContext(ctx, "Table: failed to unmarshal post", "error", err, "slug", slug)
 		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
 	}
 
@@ -116,6 +124,7 @@ func (t *Table) ListByUser(ctx context.Context, userID uuid.UUID) ([]*Post, erro
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to query posts", "error", err, "user_id", userID, "table_name", TableName)
 		return nil, fmt.Errorf("failed to query posts: %w", err)
 	}
 
@@ -123,6 +132,7 @@ func (t *Table) ListByUser(ctx context.Context, userID uuid.UUID) ([]*Post, erro
 	for _, item := range result.Items {
 		var post Post
 		if err := attributevalue.UnmarshalMap(item, &post); err != nil {
+			slog.ErrorContext(ctx, "Table: failed to unmarshal post in list", "error", err, "user_id", userID)
 			return nil, fmt.Errorf("failed to unmarshal post: %w", err)
 		}
 		posts = append(posts, &post)
@@ -141,6 +151,7 @@ func (t *Table) Delete(ctx context.Context, userID, postID uuid.UUID) error {
 		},
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "Table: failed to delete post", "error", err, "user_id", userID, "post_id", postID, "table_name", TableName)
 		return fmt.Errorf("failed to delete post: %w", err)
 	}
 
