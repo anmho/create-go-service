@@ -2,8 +2,8 @@ package posts
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-
 const PostTableName string = "PostTable"
 const UserID string = "user_id"
 const CreatedAt string = "created_at"
@@ -22,69 +21,27 @@ const PostIDGSI string = "GSI_PostID"
 const DefaultRCU = 100
 const DefaultWCU = 100
 
+var PostNotFoundError error = errors.New("Post not found")
+
+// Table is a repository for DynamoDB operations on posts
 type Table struct {
 	dynamoClient *dynamodb.Client
 }
 
-func NewTable(dynamoClient *dynamodb.Client) *Table {
-	return &Table{
-		dynamoClient: dynamoClient,
-	}
-}
-
-
-func (t *Table) CreateIfNotExists(ctx context.Context) error {
-	_, err := t.dynamoClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+// NewTable creates a new posts table repository and tests the connection
+// by describing the table to fail fast if the connection fails
+func NewTable(ctx context.Context, dynamoClient *dynamodb.Client) (*Table, error) {
+	// Test connection by describing the table - fail fast if connection fails
+	_, err := dynamoClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(PostTableName),
 	})
-	if err == nil {
-		_, err := t.dynamoClient.CreateTable(ctx, &dynamodb.CreateTableInput{
-			AttributeDefinitions:      []types.AttributeDefinition{
-				{
-					AttributeName: aws.String(UserID),
-					AttributeType: types.ScalarAttributeTypeS,
-				},
-				{
-					AttributeName: aws.String(CreatedAt),
-					AttributeType: types.ScalarAttributeTypeS,
-				},
-			},
-			KeySchema:                 []types.KeySchemaElement{
-				{
-					AttributeName: aws.String(UserID),
-					KeyType:       types.KeyTypeHash,
-				},
-				{
-					AttributeName: aws.String(CreatedAt),
-					KeyType:       types.KeyTypeRange,
-				},
-			},
-			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
-				{
-					IndexName: aws.String(PostIDGSI),
-					KeySchema: []types.KeySchemaElement{
-						{
-							AttributeName: aws.String(PostID),
-							KeyType:       types.KeyTypeHash,
-						},
-					},
-				},
-			},
-			TableName:                 aws.String(PostTableName),
-			BillingMode:               types.BillingModeProvisioned,
-			ProvisionedThroughput:     &types.ProvisionedThroughput{
-				ReadCapacityUnits:  aws.Int64(DefaultRCU),
-				WriteCapacityUnits: aws.Int64(DefaultWCU),
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("error creating table %w", err)
-		}
-
-	} else {
-		slog.Info("Skipping creating table. Already exists", "table", PostTableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to DynamoDB table %s: %w", PostTableName, err)
 	}
-	return nil
+
+	return &Table{
+		dynamoClient: dynamoClient,
+	}, nil
 }
 
 func (t *Table) Put(ctx context.Context, post *Post) error {
@@ -93,9 +50,9 @@ func (t *Table) Put(ctx context.Context, post *Post) error {
 		return fmt.Errorf("error during PUT to %s %w", PostTableName, err)
 	}
 	_, err = t.dynamoClient.PutItem(ctx, &dynamodb.PutItemInput{
-		Item:                                valueMap,
-		TableName:                           aws.String(PostTableName),
-		ReturnConsumedCapacity:              types.ReturnConsumedCapacityTotal,
+		Item:                   valueMap,
+		TableName:              aws.String(PostTableName),
+		ReturnConsumedCapacity: types.ReturnConsumedCapacityTotal,
 	})
 	if err != nil {
 		return err
@@ -103,19 +60,18 @@ func (t *Table) Put(ctx context.Context, post *Post) error {
 	return nil
 }
 
-// List returns all notes authored by the user with id userID
-func (t *Table) List(ctx context.Context, userID string) ([]Post, error) {
+// List returns all posts authored by the user with id userID
+func (t *Table) List(ctx context.Context, userID uuid.UUID) ([]Post, error) {
 	params := &dynamodb.QueryInput{
-		TableName:                 aws.String(PostTableName),
-		KeyConditionExpression:    aws.String(fmt.Sprintf("%s = :userID", UserID)),
+		TableName:              aws.String(PostTableName),
+		KeyConditionExpression: aws.String(fmt.Sprintf("%s = :userID", UserID)),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":userID": &types.AttributeValueMemberS{Value: userID},
+			":userID": &types.AttributeValueMemberS{Value: userID.String()},
 		},
-		ConsistentRead:            aws.Bool(false),
-		ReturnConsumedCapacity:    types.ReturnConsumedCapacityTotal,
-		ScanIndexForward:          aws.Bool(false),
+		ConsistentRead:         aws.Bool(false),
+		ReturnConsumedCapacity: types.ReturnConsumedCapacityTotal,
+		ScanIndexForward:       aws.Bool(false),
 	}
-
 
 	result, err := t.dynamoClient.Query(ctx, params)
 	if err != nil {
@@ -125,51 +81,50 @@ func (t *Table) List(ctx context.Context, userID string) ([]Post, error) {
 
 	err = attributevalue.UnmarshalListOfMaps(result.Items, &posts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal notes: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal posts: %w", err)
 	}
 
 	return posts, nil
 }
 
-// Get retrieves a note by its ID using the GSI_PostID index
+// Get retrieves a post by its ID using the GSI_PostID index
 func (t *Table) Get(ctx context.Context, postID uuid.UUID) (*Post, error) {
 	params := &dynamodb.QueryInput{
-		TableName:                 aws.String(PostTableName),
-		IndexName:                 aws.String(PostIDGSI),
-		KeyConditionExpression:    aws.String(fmt.Sprintf("%s = :postID", PostID)),
+		TableName:              aws.String(PostTableName),
+		IndexName:              aws.String(PostIDGSI),
+		KeyConditionExpression: aws.String(fmt.Sprintf("%s = :postID", PostID)),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":postID": &types.AttributeValueMemberS{Value: postID.String()},
 		},
-		ConsistentRead:            aws.Bool(false),
-		ReturnConsumedCapacity:    types.ReturnConsumedCapacityTotal,
+		ConsistentRead:         aws.Bool(false),
+		ReturnConsumedCapacity: types.ReturnConsumedCapacityTotal,
 	}
 
 	result, err := t.dynamoClient.Query(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query note by ID %s: %w", postID, err)
+		return nil, fmt.Errorf("failed to query post by ID %s: %w", postID, err)
 	}
 
 	if len(result.Items) == 0 {
-		return nil, fmt.Errorf("note with ID %s not found", postID)
+		return nil, PostNotFoundError
 	}
 
 	if len(result.Items) > 1 {
-		return nil, fmt.Errorf("multiple notes found with ID %s", postID)
+		return nil, fmt.Errorf("multiple posts found with ID %s", postID)
 	}
 
-	var note Post
-	err = attributevalue.UnmarshalMap(result.Items[0], &note)
+	var post Post
+	err = attributevalue.UnmarshalMap(result.Items[0], &post)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal note: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal post: %w", err)
 	}
 
-	return &note, nil
+	return &post, nil
 }
 
-
-// DeleteByPostId removes a note by post ID (finds it via GSI first, then deletes from main table)
+// DeleteByPostId removes a post by post ID (finds it via GSI first, then deletes from main table)
 func (t *Table) Delete(ctx context.Context, postID uuid.UUID) error {
-	// First query GSI to get the note and its primary key components
+	// First query GSI to get the post and its primary key components
 	post, err := t.Get(ctx, postID)
 	if err != nil {
 		return fmt.Errorf("failed to find post with ID %s for deletion: %w", postID.String(), err)
@@ -179,7 +134,7 @@ func (t *Table) Delete(ctx context.Context, postID uuid.UUID) error {
 	params := &dynamodb.DeleteItemInput{
 		TableName: aws.String(PostTableName),
 		Key: map[string]types.AttributeValue{
-			UserID:     &types.AttributeValueMemberS{Value: post.Author.String()},
+			UserID:    &types.AttributeValueMemberS{Value: post.Author.String()},
 			CreatedAt: &types.AttributeValueMemberS{Value: post.CreatedAt.Format(time.RFC3339)},
 		},
 		ReturnConsumedCapacity: types.ReturnConsumedCapacityTotal,
@@ -190,5 +145,5 @@ func (t *Table) Delete(ctx context.Context, postID uuid.UUID) error {
 		return fmt.Errorf("failed to delete post: %w", err)
 	}
 
-	return nil 
+	return nil
 }
