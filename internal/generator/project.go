@@ -76,9 +76,18 @@ func (g *Generator) Generate() error {
 
 	data := g.getTemplateData()
 
-	// Generate main.go
+	// Generate main.go (only if not gRPC, as gRPC has its own main.go)
+	hasGRPC := false
+	for _, apiType := range g.config.API.Types {
+		if apiType == api.TypeGRPC {
+			hasGRPC = true
+			break
+		}
+	}
+	if !hasGRPC {
 	if err := g.generateFile("cmd/api/main.go", "base/main.go.tmpl", data); err != nil {
 		return fmt.Errorf("failed to generate main.go: %w", err)
+		}
 	}
 
 	// Generate config files
@@ -277,6 +286,12 @@ func (g *Generator) generatePostsFiles() error {
 		return err
 	}
 	if err := g.generateFile("internal/posts/service.go", "posts/service.go.tmpl", data); err != nil {
+		return err
+	}
+	if err := g.generateFile("internal/posts/converters.go", "posts/converters.go.tmpl", data); err != nil {
+		return err
+	}
+	if err := g.generateFile("internal/posts/converters_test.go", "posts/converters_test.go.tmpl", data); err != nil {
 		return err
 	}
 

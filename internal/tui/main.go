@@ -615,10 +615,39 @@ func (m *Model) renderComplete() string {
 		MarginTop(2).
 		Render(fmt.Sprintf("📁 Location: %s", m.outputDir.value))
 	
+	// Build next steps based on selections
+	var nextStepsList []string
+	nextStepsList = append(nextStepsList, fmt.Sprintf("cd %s", m.outputDir.value))
+	nextStepsList = append(nextStepsList, "make deps    # Install dependencies")
+	nextStepsList = append(nextStepsList, "make build   # Build the project")
+	nextStepsList = append(nextStepsList, "make run     # Run locally")
+	nextStepsList = append(nextStepsList, "make test    # Run tests")
+	
+	// Add database-specific steps
+	databaseSelected := m.databaseSelect.GetSelected()
+	if strings.Contains(databaseSelected, "PostgreSQL") {
+		nextStepsList = append(nextStepsList, "make atlas-init  # Initialize migrations")
+		nextStepsList = append(nextStepsList, "make migrate      # Run migrations")
+	} else if strings.Contains(databaseSelected, "DynamoDB") {
+		nextStepsList = append(nextStepsList, "make terraform    # Provision infrastructure")
+	}
+	
+	// Add deployment steps
+	deploymentSelected := m.deploymentSelect.GetSelected()
+	if strings.Contains(deploymentSelected, "Fly.io") {
+		nextStepsList = append(nextStepsList, "make deploy       # Deploy to Fly.io")
+		nextStepsList = append(nextStepsList, "make deploy-local # Deploy with local build")
+	}
+	
+	nextStepsText := "Next steps:\n"
+	for _, step := range nextStepsList {
+		nextStepsText += "  " + step + "\n"
+	}
+	
 	nextSteps := lipgloss.NewStyle().
 		Foreground(secondaryColor).
 		MarginTop(1).
-		Render("Next steps:\n  cd " + m.outputDir.value + "\n  make run")
+		Render(nextStepsText)
 	
 	help := helpStyle.Render("\nPress Enter to exit...")
 
