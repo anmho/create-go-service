@@ -1,4 +1,4 @@
-.PHONY: help start-dynamo stop-dynamo create-table seed-data run-local clean-local test-local cli-build cli-run cli-install cli-uninstall test coverage
+.PHONY: help start-dynamo stop-dynamo create-table seed-data run-local clean-local test-local cli-build cli-run cli-install cli-uninstall test coverage release snapshot
 # CLI tool commands
 cli-build:
 	@echo "Building CLI tool..."
@@ -130,3 +130,17 @@ test-local:
 setup-local: start-dynamo create-table seed-data
 	@echo "Local development environment is ready!"
 	@echo "Run 'make run-local' to start the application"
+
+# Release commands
+release:
+	@echo "Creating release..."
+	@if [ -z "$(TAG)" ]; then \
+		echo "Error: TAG is required. Usage: make release TAG=v1.0.0"; \
+		exit 1; \
+	fi
+	git tag -a $(TAG) -m "Release $(TAG)"
+	git push origin $(TAG)
+
+snapshot:
+	@echo "Creating snapshot release..."
+	goreleaser release --snapshot --clean
