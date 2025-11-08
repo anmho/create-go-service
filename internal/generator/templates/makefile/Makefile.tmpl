@@ -1,4 +1,4 @@
-.PHONY: help deps build build-cli run test deploy deploy-local clean{{- if .HasGRPC}} generate{{- end}}{{- if .HasDynamoDB}} terraform terraform-init terraform-plan terraform-apply{{- end}}{{- if .HasPostgres}} atlas-init migrate migrate-up migrate-down migrate-status migrate-new migrate-prod migrate-validate migrate-lint atlas-check{{- end}}
+.PHONY: help deps build build-cli image run test deploy deploy-local destroy{{- if .HasDynamoDB}} terraform-destroy start-dynamo stop-dynamo check-dynamo{{- end}} clean{{- if .HasGRPC}} generate{{- end}}{{- if .HasDynamoDB}} terraform terraform-init terraform-plan terraform-apply{{- end}}{{- if .HasPostgres}} atlas-init migrate migrate-up migrate-down migrate-status migrate-new migrate-prod migrate-validate migrate-lint atlas-check{{- end}}
 
 # Default target
 help:
@@ -7,13 +7,19 @@ help:
 	@echo "  build        - Build the API server"
 	@echo "  build-cli    - Build the postctl CLI"
 	@echo "  install-cli  - Install postctl to /usr/local/bin"
+	@echo "  image        - Build Docker image"
 	@echo "  run          - Run the application"
 	@echo "  test         - Run tests"
+{{- if .HasDynamoDB}}
+	@echo "  start-dynamo - Start DynamoDB Local container"
+	@echo "  stop-dynamo  - Stop DynamoDB Local container"
+{{- end}}
 {{- if .HasGRPC}}
 	@echo "  generate     - Generate code from protobuf definitions"
 {{- end}}
 {{- if .HasDynamoDB}}
-	@echo "  terraform    - Provision infrastructure with Terraform"
+	@echo "  terraform        - Provision infrastructure with Terraform"
+	@echo "  terraform-destroy - Destroy Terraform infrastructure"
 {{- end}}
 {{- if .HasPostgres}}
 	@echo "  atlas-init   - Initialize Atlas project (run once)"
@@ -28,6 +34,7 @@ help:
 {{- end}}
 	@echo "  deploy       - Deploy to Fly.io (creates app on first run, provisions infrastructure first)"
 	@echo "  deploy-local - Deploy with local build (faster)"
+	@echo "  destroy      - Destroy Fly.io app (permanent, deletes all resources)"
 	@echo "  clean        - Clean build artifacts"
 
 # Install dependencies
@@ -63,6 +70,9 @@ deps:
 # Generate protobuf code
 generate: deps
 	@echo "Generating protobuf code..."
+	@echo "Updating buf dependencies..."
+	buf dep update
+	@echo "Generating code from protobuf definitions..."
 	buf generate
 
 {{- end}}
@@ -75,6 +85,13 @@ build:{{- if .HasGRPC}} generate{{- end}}
 build-cli:
 	@echo "Building postctl CLI..."
 	go build -o bin/postctl cmd/postctl/main.go
+
+# Build Docker image
+image:{{- if .HasGRPC}} generate{{- end}}
+	@echo "Building Docker image..."
+	@command -v docker >/dev/null 2>&1 || { echo "Docker is not installed. Install from https://www.docker.com/get-started"; exit 1; }
+	docker build -t {{.ProjectName}}:latest .
+	@echo "✓ Docker image built: {{.ProjectName}}:latest"
 
 # Install CLI tool
 install-cli: build-cli
@@ -90,7 +107,7 @@ install-cli: build-cli
 	@echo "You can now run 'postctl' from anywhere!"
 
 # Run API server
-run:
+run:{{- if .HasGRPC}} generate{{- end}}
 	@echo "Running API server..."
 	go run cmd/api/main.go
 
@@ -100,6 +117,38 @@ test:
 	go test -v ./...
 
 {{- if .HasDynamoDB}}
+# Start DynamoDB Local
+start-dynamo:
+	@echo "Starting DynamoDB Local..."
+	@command -v docker >/dev/null 2>&1 || { echo "Docker is not installed. Install from https://www.docker.com/get-started"; exit 1; }
+	@if [ ! -f docker-compose.yml ]; then \
+		echo "Error: docker-compose.yml not found"; \
+		exit 1; \
+	fi
+	docker compose up -d dynamodb
+	@echo "✓ DynamoDB Local is running on http://localhost:8000"
+	@echo "  Wait a few seconds for it to be ready before running the server"
+
+# Stop DynamoDB Local
+stop-dynamo:
+	@echo "Stopping DynamoDB Local..."
+	@if [ -f docker-compose.yml ]; then \
+		docker compose stop dynamodb; \
+		echo "✓ DynamoDB Local stopped"; \
+	else \
+		echo "docker-compose.yml not found, skipping..."; \
+	fi
+
+# Check if DynamoDB Local is running
+check-dynamo:
+	@echo "Checking DynamoDB Local status..."
+	@if docker ps --format '{{.Names}}' | grep -q dynamodb; then \
+		echo "✓ DynamoDB Local is running"; \
+	else \
+		echo "✗ DynamoDB Local is not running. Run 'make start-dynamo' first"; \
+		exit 1; \
+	fi
+
 # Provision infrastructure with Terraform
 terraform-init:
 	@echo "Initializing Terraform..."
@@ -116,6 +165,18 @@ terraform-apply: terraform-plan
 
 terraform: terraform-apply
 	@echo "✓ Infrastructure provisioned"
+
+# Destroy Terraform infrastructure
+terraform-destroy: terraform-init
+	@echo "⚠️  WARNING: This will destroy all Terraform-managed infrastructure!"
+	@read -p "Are you sure you want to destroy infrastructure? (type 'yes' to confirm): " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Destroy cancelled."; \
+		exit 1; \
+	fi
+	@echo "Destroying Terraform infrastructure..."
+	cd terraform && terraform destroy -auto-approve
+	@echo "✓ Infrastructure destroyed"
 
 {{- end}}
 {{- if .HasPostgres}}
@@ -229,6 +290,26 @@ deploy-local:{{- if .HasDynamoDB}} terraform{{- end}}{{- if .HasPostgres}} migra
 		echo "Deploying updates..."; \
 		flyctl deploy --local-only; \
 	fi
+
+# Destroy Fly.io app and infrastructure (permanent - deletes app and all resources)
+destroy:{{- if .HasDynamoDB}} terraform-destroy{{- end}}
+	@echo "⚠️  WARNING: This will permanently delete the Fly.io app '{{.ProjectName}}' and all associated resources!"
+	@echo "This action cannot be undone."
+	@read -p "Are you sure you want to continue? (type 'yes' to confirm): " confirm; \
+	if [ "$$confirm" != "yes" ]; then \
+		echo "Destroy cancelled."; \
+		exit 1; \
+	fi
+	@echo "Destroying Fly.io app..."
+	@if command -v flyctl >/dev/null 2>&1; then \
+		flyctl apps destroy {{.ProjectName}} --yes; \
+	elif command -v fly >/dev/null 2>&1; then \
+		fly apps destroy {{.ProjectName}} --yes; \
+	else \
+		echo "Error: flyctl or fly command not found. Install from https://fly.io/docs/getting-started/installing-flyctl/"; \
+		exit 1; \
+	fi
+	@echo "✓ App destroyed"
 
 # Clean
 clean:

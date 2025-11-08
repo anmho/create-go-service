@@ -18,16 +18,15 @@ provider "aws" {
 # Get current AWS account ID
 data "aws_caller_identity" "current" {}
 
-# Get current AWS account alias
-data "aws_iam_account_alias" "current" {}
-
 # Output account ID and alias before creating table
 resource "null_resource" "account_info" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "AWS Account ID: ${data.aws_caller_identity.current.account_id}"
-      if [ -n "${try(data.aws_iam_account_alias.current.account_alias, "")}" ]; then
-        echo "AWS Account Alias: ${data.aws_iam_account_alias.current.account_alias}"
+      # Try to get account alias (may not exist)
+      ALIAS=$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null || echo "")
+      if [ -n "$ALIAS" ]; then
+        echo "AWS Account Alias: $ALIAS"
       else
         echo "No AWS account alias found"
       fi
@@ -46,7 +45,7 @@ output "aws_account_id" {
 }
 
 output "aws_account_alias" {
-  description = "AWS Account Alias"
-  value       = try(data.aws_iam_account_alias.current.account_alias, "No alias found")
+  description = "AWS Account Alias (fetched via local-exec, may be empty)"
+  value       = "Use 'aws iam list-account-aliases' to get the alias if needed"
 }
 
