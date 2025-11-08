@@ -1,0 +1,82 @@
+package posts
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
+{{- if .HasGRPC}}
+	postsv1 "{{.ModulePath}}/protos/gen/posts/v1"
+{{- end}}
+)
+
+{{- if .HasGRPC}}
+// PostToProto converts a Post model to a proto Post message
+func PostToProto(post *Post) *postsv1.Post {
+	return &postsv1.Post{
+		Id:        post.ID.String(),
+		UserId:    post.UserID.String(),
+		Title:     post.Title,
+		Content:   post.Content,
+		CreatedAt: timestamppb.New(post.CreatedAt),
+		UpdatedAt: timestamppb.New(post.UpdatedAt),
+	}
+}
+
+// ProtoToPost converts a proto Post message to a Post model
+func ProtoToPost(proto *postsv1.Post) (*Post, error) {
+	id, err := uuid.Parse(proto.Id)
+	if err != nil {
+		return nil, err
+	}
+
+	userID, err := uuid.Parse(proto.UserId)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Post{
+		ID:        id,
+		UserID:    userID,
+		Title:     proto.Title,
+		Content:   proto.Content,
+		CreatedAt: proto.CreatedAt.AsTime(),
+		UpdatedAt: proto.UpdatedAt.AsTime(),
+	}, nil
+}
+{{- end}}
+
+// PostToStorage converts a Post model to a PostStorageModel
+func PostToStorage(post *Post) *PostStorageModel {
+	return &PostStorageModel{
+		UserID:    post.UserID.String(),
+		CreatedAt: post.CreatedAt.UnixMilli(),
+		PostID:    post.ID.String(),
+		Title:     post.Title,
+		Content:   post.Content,
+		UpdatedAt: post.UpdatedAt.UnixMilli(),
+	}
+}
+
+// StorageToPost converts a PostStorageModel to a Post model
+func StorageToPost(storage *PostStorageModel) (*Post, error) {
+	userID, err := uuid.Parse(storage.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	postID, err := uuid.Parse(storage.PostID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Post{
+		ID:        postID,
+		UserID:    userID,
+		Title:     storage.Title,
+		Content:   storage.Content,
+		CreatedAt: time.UnixMilli(storage.CreatedAt),
+		UpdatedAt: time.UnixMilli(storage.UpdatedAt),
+	}, nil
+}
+
