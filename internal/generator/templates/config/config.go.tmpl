@@ -1,12 +1,17 @@
 package config
 
 import (
+	"embed"
 	"fmt"
 	"os"
 
 	"github.com/caarlos0/env/v10"
+	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed production.yaml local.yaml
+var configFS embed.FS
 
 var _ = env.Parse // Imported for secrets parsing when needed
 
@@ -15,7 +20,6 @@ type Stage string
 
 const (
 	StageLocal      Stage = "local"
-	StageDevelopment Stage = "development"
 	StageProduction Stage = "production"
 )
 
@@ -32,6 +36,21 @@ func (s Stage) IsLocal() bool {
 // IsProduction returns true if the stage is production
 func (s Stage) IsProduction() bool {
 	return s == StageProduction
+}
+
+// IsValid returns true if the stage is a valid known stage
+func (s Stage) IsValid() bool {
+	return s == StageLocal || s == StageProduction
+}
+
+// ParseStage parses a string into a Stage enum and validates it
+// Returns an error if the stage is unknown
+func ParseStage(s string) (Stage, error) {
+	stage := Stage(s)
+	if !stage.IsValid() {
+		return "", fmt.Errorf("unknown stage: %s (must be one of: %s, %s)", s, StageLocal, StageProduction)
+	}
+	return stage, nil
 }
 
 type Config struct {
@@ -59,8 +78,6 @@ type DatabaseConfig struct {
 	AWSRegion   string `yaml:"aws_region"`
 	TableName   string `yaml:"table_name"`
 	EndpointURL string `yaml:"endpoint_url"` // Optional: for local DynamoDB (e.g., http://localhost:8000)
-{{- else if eq .Database "postgres"}}
-	URL string `yaml:"url"`
 {{- end}}
 }
 
@@ -84,60 +101,81 @@ type PostHogConfig struct {
 }
 {{- end}}
 
-{{- if .HasAuth}}
 type SecretsConfig struct {
+{{- if eq .Database "dynamodb"}}
+	AWSAccessKeyID     string `env:"AWS_ACCESS_KEY_ID"`
+	AWSSecretAccessKey string `env:"AWS_SECRET_ACCESS_KEY"`
+{{- end}}
 {{- if .HasPostgres}}
 	DatabaseURL string `env:"DATABASE_URL,required"`
 {{- end}}
-	JWTSecret   string `env:"JWT_SECRET,required"`
+{{- if .HasAuth}}
+	JWTSecret string `env:"JWT_SECRET,required"`
+{{- end}}
 {{- if .HasPostHog}}
 	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
 {{- end}}
 }
-{{- else if .HasPostgres}}
-type SecretsConfig struct {
-	DatabaseURL string `env:"DATABASE_URL,required"`
-{{- if .HasPostHog}}
-	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
-{{- end}}
-}
-{{- else if .HasPostHog}}
-type SecretsConfig struct {
-	PostHogAPIKey string `env:"POSTHOG_API_KEY"`
-}
-{{- else}}
-type SecretsConfig struct {
-	// No secrets required
-}
-{{- end}}
 
-// Load reads configuration from stage-specific YAML file and loads secrets from environment variables
+// Load reads configuration from stage-specific YAML file and secrets from environment variables
+// All config files (local.yaml, production.yaml) are bundled in the Docker image
+// The STAGE environment variable selects which config file to use at runtime
+// YAML file is the source of truth - no overrides
+// Secrets (AWS credentials, database URLs, JWT secrets) are loaded from environment variables only
+// Defaults to "production" if STAGE is not set
 func Load() (*Config, error) {
 	cfg := &Config{}
 
-	// Determine stage from environment variable (only for selecting which YAML file to load)
-	stage := os.Getenv("STAGE")
-	if stage == "" {
-		stage = "local"
-	}
-
-	// Load from stage-specific YAML file
-	configPath := fmt.Sprintf("%s.yaml", stage)
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+	// First, check STAGE from environment to know which .env file to load
+	// We need to load the .env file BEFORE parsing all environment variables
+	stageStr := os.Getenv("STAGE")
+	var stage Stage
+	if stageStr == "" {
+		stage = StageProduction
+	} else {
+		var err error
+		stage, err = ParseStage(stageStr)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("config file %s not found. Please ensure the YAML config file exists for stage: %s", configPath, stage)
 	}
 
+	// Load .env file based on stage BEFORE parsing environment variables
+	// This ensures values from .env files are available when parsing
+	switch stage {
+	case StageLocal:
+		// Load .env.local file from current working directory
+		// This file is generated from .env.local.example template with placeholder values
+		if err := godotenv.Load(".env.local"); err != nil {
+			return nil, fmt.Errorf("failed to load .env.local file for local stage: %w. The file should be generated from .env.local.example template", err)
+		}
+	case StageProduction:
+		// For production, optionally load .env file if it exists (though it should be empty)
+		// Secrets are primarily set via deployment platform environment variables
+		_ = godotenv.Load(".env") // Ignore errors - .env is optional and empty for production
+	}
+
+	// Now parse all environment variables in one go (secrets are parsed below)
+	// Stage is already determined above, so we don't need to parse it again
+
+	// Load config from embedded filesystem (all config files are bundled in binary)
+	// Both local.yaml and production.yaml are embedded, STAGE selects which to use
+	// This allows the application to run in any mode without filesystem access
+	configFileName := fmt.Sprintf("%s.yaml", stage)
+	data, err := configFS.ReadFile(configFileName)
+	if err != nil {
+		return nil, fmt.Errorf("config file %s not found in embedded filesystem for STAGE=%s", configFileName, stage)
+	}
+
+	// Parse YAML file - this is the source of truth for all non-secret configuration
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
+		return nil, fmt.Errorf("failed to parse config file for stage %s: %w", stage, err)
 	}
 
-	// Load secrets from environment variables only (required)
+	// Parse secrets from environment variables (already loaded from .env files above)
+	// Note: AWS credentials are optional when using local DynamoDB (endpoint_url is set)
 	if err := env.Parse(&cfg.Secrets); err != nil {
-		return nil, fmt.Errorf("failed to parse secrets from env: %w", err)
+		return nil, fmt.Errorf("failed to parse secrets from environment variables: %w. Please ensure all required secrets are set (e.g., DATABASE_URL, JWT_SECRET). AWS credentials are optional for local DynamoDB", err)
 	}
 
 	return cfg, nil

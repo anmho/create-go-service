@@ -21,11 +21,11 @@ type ProjectConfig struct {
 	ModulePath  string
 	OutputDir   string
 	Features    []Feature // Optional features (e.g., auth)
-	
+
 	// Optional feature configurations
 	Auth    AuthConfig
 	PostHog PostHogConfig
-	
+
 	// Grouped configurations
 	API        api.Config
 	Database   database.Config
@@ -42,4 +42,3 @@ type PostHogConfig struct {
 	APIKey string
 	Host   string
 }
-
