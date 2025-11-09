@@ -1,0 +1,76 @@
+project_name: create-go-service
+
+builds:
+  - id: create-go-service
+    main: ./cmd/create-go-service
+    binary: create-go-service
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X github.com/anmho/create-go-service/internal/cli.Version={{.Version}}
+      - -X github.com/anmho/create-go-service/internal/cli.Commit={{.Commit}}
+      - -X github.com/anmho/create-go-service/internal/cli.BuildTime={{.Date}}
+
+archives:
+  - id: default
+    builds:
+      - create-go-service
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - name: create-go-service
+    tap:
+      owner: anmho
+      name: homebrew-tap
+    homepage: https://github.com/anmho/create-go-service
+    description: "A CLI tool that scaffolds production-ready Go microservice boilerplate with a modern TUI interface"
+    license: MIT
+    test: |
+      system "#{bin}/create-go-service", "--version"
+    install: |
+      bin.install "create-go-service"
+      bin.install_symlink "create-go-service" => "cgs"
+
+nfpms:
+  - id: default
+    package_name: create-go-service
+    formats:
+      - deb
+      - rpm
+    homepage: https://github.com/anmho/create-go-service
+    description: "A CLI tool that scaffolds production-ready Go microservice boilerplate with a modern TUI interface"
+    license: MIT
+    maintainer: "anmho <your-email@example.com>"
+    vendor: "anmho"
+    files:
+      - src: bin/create-go-service
+        dst: /usr/local/bin/create-go-service
+      - src: bin/create-go-service
+        dst: /usr/local/bin/cgs
+
