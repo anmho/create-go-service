@@ -36,22 +36,22 @@ func (a *App) Run() error {
 }
 
 type Model struct {
-	step                Step
-	projectName         textInputModel
-	modulePath          textInputModel
-	outputDir           textInputModel
-	apiSelect           singleSelectModel
-	databaseSelect      singleSelectModel
-	featuresSelect      multiSelectModel
-	jwtSecret           textInputModel
-	posthogAPIKey       textInputModel
-	posthogHost         textInputModel
-	deploymentSelect    singleSelectModel
-	spinner             spinner.Model
-	err                 error
-	generating          bool
-	generationSteps     []string
-	currentStepIdx      int
+	step             Step
+	projectName      textInputModel
+	modulePath       textInputModel
+	outputDir        textInputModel
+	apiSelect        singleSelectModel
+	databaseSelect   singleSelectModel
+	featuresSelect   multiSelectModel
+	jwtSecret        textInputModel
+	posthogAPIKey    textInputModel
+	posthogHost      textInputModel
+	deploymentSelect singleSelectModel
+	spinner          spinner.Model
+	err              error
+	generating       bool
+	generationSteps  []string
+	currentStepIdx   int
 }
 
 type Step int
@@ -100,18 +100,18 @@ func NewModel() *Model {
 	s.Style = spinnerStyle
 
 	return &Model{
-		step:                StepWelcome,
-		projectName:         newTextInput("Project Name", "my-service"),
-		modulePath:          newTextInput("Module Path", "github.com/user/service"),
-		outputDir:           newTextInput("Output Directory", "./my-service"),
-		apiSelect:           newSingleSelect("Select API Framework", apiOptions, 0),
-		databaseSelect:      newSingleSelect("Select Database Type", databaseOptions, 0),
-		featuresSelect:      newMultiSelect("Select Features (space to select, enter to continue)", featureOptions),
-		jwtSecret:           newTextInput("JWT Secret", "your-jwt-secret"),
-		posthogAPIKey:       newTextInput("PostHog API Key", "phc_..."),
-		posthogHost:         newTextInput("PostHog Host", "https://app.posthog.com"),
-		deploymentSelect:    newSingleSelect("Select Deployment Type", deploymentOptions, 0),
-		spinner:             s,
+		step:             StepWelcome,
+		projectName:      newTextInput("Project Name", "my-service"),
+		modulePath:       newTextInput("Module Path", "github.com/user/service"),
+		outputDir:        newTextInput("Output Directory", "./my-service"),
+		apiSelect:        newSingleSelect("Select API Framework", apiOptions, 0),
+		databaseSelect:   newSingleSelect("Select Database Type", databaseOptions, 0),
+		featuresSelect:   newMultiSelect("Select Features (space to select, enter to continue)", featureOptions),
+		jwtSecret:        newTextInput("JWT Secret", "your-jwt-secret"),
+		posthogAPIKey:    newTextInput("PostHog API Key", "phc_..."),
+		posthogHost:      newTextInput("PostHog Host", "https://app.posthog.com"),
+		deploymentSelect: newSingleSelect("Select Deployment Type", deploymentOptions, 0),
+		spinner:          s,
 		generationSteps: []string{
 			"Creating directory structure...",
 			"Generating base files...",
@@ -144,7 +144,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Don't allow input while generating
 			return m, nil
 		}
-		
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -579,7 +579,7 @@ func (m *Model) renderReview() string {
 
 func (m *Model) renderGenerating() string {
 	title := titleStyle.Render("⚙️  Generating project...")
-	
+
 	var steps []string
 	for i, step := range m.generationSteps {
 		if i < m.currentStepIdx {
@@ -595,26 +595,26 @@ func (m *Model) renderGenerating() string {
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, steps...)
-	
+
 	return lipgloss.JoinVertical(lipgloss.Left, title, "", content)
 }
 
 func (m *Model) renderComplete() string {
 	title := successStyle.Render("✅ Project generated successfully!")
-	
+
 	var completedSteps []string
 	for _, step := range m.generationSteps {
 		completedSteps = append(completedSteps, successStyle.Render("✓ ")+lipgloss.NewStyle().Foreground(grayColor).Render(step))
 	}
-	
+
 	stepsView := lipgloss.JoinVertical(lipgloss.Left, completedSteps...)
-	
+
 	location := lipgloss.NewStyle().
 		Foreground(whiteColor).
 		Bold(true).
 		MarginTop(2).
 		Render(fmt.Sprintf("📁 Location: %s", m.outputDir.value))
-	
+
 	// Build next steps based on selections
 	var nextStepsList []string
 	nextStepsList = append(nextStepsList, fmt.Sprintf("cd %s", m.outputDir.value))
@@ -622,7 +622,7 @@ func (m *Model) renderComplete() string {
 	nextStepsList = append(nextStepsList, "make build   # Build the project")
 	nextStepsList = append(nextStepsList, "make run     # Run locally")
 	nextStepsList = append(nextStepsList, "make test    # Run tests")
-	
+
 	// Add database-specific steps
 	databaseSelected := m.databaseSelect.GetSelected()
 	if strings.Contains(databaseSelected, "PostgreSQL") {
@@ -631,24 +631,24 @@ func (m *Model) renderComplete() string {
 	} else if strings.Contains(databaseSelected, "DynamoDB") {
 		nextStepsList = append(nextStepsList, "make terraform    # Provision infrastructure")
 	}
-	
+
 	// Add deployment steps
 	deploymentSelected := m.deploymentSelect.GetSelected()
 	if strings.Contains(deploymentSelected, "Fly.io") {
 		nextStepsList = append(nextStepsList, "make deploy       # Deploy to Fly.io")
 		nextStepsList = append(nextStepsList, "make deploy-local # Deploy with local build")
 	}
-	
+
 	nextStepsText := "Next steps:\n"
 	for _, step := range nextStepsList {
 		nextStepsText += "  " + step + "\n"
 	}
-	
+
 	nextSteps := lipgloss.NewStyle().
 		Foreground(secondaryColor).
 		MarginTop(1).
 		Render(nextStepsText)
-	
+
 	help := helpStyle.Render("\nPress Enter to exit...")
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, "", stepsView, location, nextSteps, help)

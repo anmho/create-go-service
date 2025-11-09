@@ -59,4 +59,3 @@ var (
 	valueStyle = lipgloss.NewStyle().
 			Foreground(secondaryColor)
 )
-

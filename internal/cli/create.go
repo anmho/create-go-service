@@ -26,15 +26,15 @@ var (
 // Execute runs the CLI application
 func Execute() error {
 	var (
-		projectName   string
-		modulePath    string
-		outputDir     string
-		apiType       string
-		databaseType  string
-		features      string
-		jwtSecret     string
-		posthogAPIKey string
-		posthogHost   string
+		projectName    string
+		modulePath     string
+		outputDir      string
+		apiType        string
+		databaseType   string
+		features       string
+		jwtSecret      string
+		posthogAPIKey  string
+		posthogHost    string
 		deploymentType string
 	)
 
@@ -44,9 +44,9 @@ func Execute() error {
 		Long:  "Generate a new Go service project with customizable API, database, and features",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Check if any flags were provided
-			flagsProvided := projectName != "" || modulePath != "" || outputDir != "" || 
-				apiType != "" || databaseType != "" || features != "" || 
-				jwtSecret != "" || posthogAPIKey != "" || posthogHost != "" || 
+			flagsProvided := projectName != "" || modulePath != "" || outputDir != "" ||
+				apiType != "" || databaseType != "" || features != "" ||
+				jwtSecret != "" || posthogAPIKey != "" || posthogHost != "" ||
 				deploymentType != ""
 
 			// If flags provided, use direct mode
@@ -86,7 +86,7 @@ func Execute() error {
 
 	// Add version flag
 	rootCmd.Flags().BoolP("version", "v", false, "Show version information")
-	
+
 	// Handle version flag before running
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		if v, _ := cmd.Flags().GetBool("version"); v {
@@ -178,15 +178,16 @@ func generateDirect(projectName, modulePath, outputDir, apiType, databaseType, f
 		}
 	}
 
-	// Parse deployment type
+	// Parse deployment type (required)
+	if deploymentType == "" {
+		return fmt.Errorf("deployment type is required (use --deployment fly)")
+	}
 	var depType deployment.Type
-	if deploymentType != "" {
-		switch strings.ToLower(deploymentType) {
-		case "fly":
-			depType = deployment.TypeFly
-		default:
-			return fmt.Errorf("invalid deployment type: %s (must be fly)", deploymentType)
-		}
+	switch strings.ToLower(deploymentType) {
+	case "fly":
+		depType = deployment.TypeFly
+	default:
+		return fmt.Errorf("invalid deployment type: %s (must be fly)", deploymentType)
 	}
 
 	// Build config
@@ -230,5 +231,3 @@ func generateDirect(projectName, modulePath, outputDir, apiType, databaseType, f
 
 	return nil
 }
-
-

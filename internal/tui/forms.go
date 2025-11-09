@@ -51,11 +51,11 @@ func (m textInputModel) View() string {
 }
 
 type multiSelectModel struct {
-	options   []string
-	selected  map[int]bool
-	cursor    int
-	label     string
-	values    []string
+	options  []string
+	selected map[int]bool
+	cursor   int
+	label    string
+	values   []string
 }
 
 func newMultiSelect(label string, options []string) multiSelectModel {
@@ -194,4 +194,3 @@ func (m singleSelectModel) GetSelected() string {
 	}
 	return ""
 }
-

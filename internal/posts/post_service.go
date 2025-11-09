@@ -17,24 +17,23 @@ func NewService(postTable *Table) *Service {
 	}
 }
 
-
 type PostParams struct {
 	AuthorID uuid.UUID
-	Title string
-	Content string
+	Title    string
+	Content  string
 }
 
 func (s *Service) CreatePost(
 	ctx context.Context,
 	postId uuid.UUID,
 	params PostParams,
-	) (*Post, error) {
+) (*Post, error) {
 
 	post := NewPost(
-		postId, 
+		postId,
 		params.AuthorID,
-		params.Title, 
-		params.Content, 
+		params.Title,
+		params.Content,
 		time.Now())
 	err := s.postTable.Put(ctx, post)
 
