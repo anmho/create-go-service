@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/types/known/timestamppb"
 {{- if .HasGRPC}}
+	"google.golang.org/protobuf/types/known/timestamppb"
 	postsv1 "{{.ModulePath}}/protos/gen/posts/v1"
 {{- end}}
 )

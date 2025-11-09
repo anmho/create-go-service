@@ -5,6 +5,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
 
@@ -30,6 +31,7 @@ func WithRegion(region string) DynamoDBOption {
 // NewDynamoDB creates a new DynamoDB client
 // Uses default AWS SDK configuration which will use IAM roles when running on AWS infrastructure
 // (EC2, ECS, Lambda, etc.) or environment credentials
+// When using a local endpoint (WithEndpoint), dummy credentials are used to allow local development without AWS credentials
 func NewDynamoDB(ctx context.Context, opts ...DynamoDBOption) (*dynamodb.Client, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -41,7 +43,11 @@ func NewDynamoDB(ctx context.Context, opts ...DynamoDBOption) (*dynamodb.Client,
 		opt(&cfg)
 	}
 
-	client := dynamodb.NewFromConfig(cfg)
-	return client, nil
+	// Use dummy credentials if local endpoint is set
+	if cfg.BaseEndpoint != nil && *cfg.BaseEndpoint != "" {
+		cfg.Credentials = credentials.NewStaticCredentialsProvider("local", "local", "")
+	}
+
+	return dynamodb.NewFromConfig(cfg), nil
 }
 

@@ -1,4 +1,4 @@
-.PHONY: help deps build build-cli image run test deploy deploy-local destroy{{- if .HasDynamoDB}} terraform-destroy start-dynamo stop-dynamo check-dynamo{{- end}} clean{{- if .HasGRPC}} generate{{- end}}{{- if .HasDynamoDB}} terraform terraform-init terraform-plan terraform-apply{{- end}}{{- if .HasPostgres}} atlas-init migrate migrate-up migrate-down migrate-status migrate-new migrate-prod migrate-validate migrate-lint atlas-check{{- end}}
+.PHONY: help deps build build-cli image run test deploy deploy-local destroy env env-local env-production{{- if .HasDynamoDB}} terraform-destroy start-dynamo stop-dynamo check-dynamo{{- end}} clean{{- if .HasGRPC}} generate{{- end}}{{- if .HasDynamoDB}} terraform terraform-init terraform-plan terraform-apply{{- end}}{{- if .HasPostgres}} atlas-init migrate migrate-up migrate-down migrate-status migrate-new migrate-prod migrate-validate migrate-lint atlas-check{{- end}}
 
 # Default target
 help:
@@ -32,6 +32,8 @@ help:
 	@echo "  migrate-validate - Validate migrations"
 	@echo "  migrate-lint - Lint migrations"
 {{- end}}
+	@echo "  env          - Generate .env.local from example"
+	@echo "  env-local    - Generate .env.local for local development"
 	@echo "  deploy       - Deploy to Fly.io (creates app on first run, provisions infrastructure first)"
 	@echo "  deploy-local - Deploy with local build (faster)"
 	@echo "  destroy      - Destroy Fly.io app (permanent, deletes all resources)"
@@ -106,10 +108,10 @@ install-cli: build-cli
 	fi
 	@echo "You can now run 'postctl' from anywhere!"
 
-# Run API server
+# Run API server (explicitly sets STAGE=local for local development)
+# Usage: make run [STAGE=local|production]
 run:{{- if .HasGRPC}} generate{{- end}}
-	@echo "Running API server..."
-	go run cmd/api/main.go
+	STAGE=$${STAGE:-local} go run cmd/api/main.go
 
 # Test
 test:
@@ -269,27 +271,32 @@ migrate-lint: atlas-check
 migrate: migrate-up
 
 {{- end}}
-# Deploy to Fly.io (creates app on first run)
-deploy:{{- if .HasDynamoDB}} terraform{{- end}}{{- if .HasPostgres}} migrate-prod{{- end}}
-	@echo "Deploying to Fly.io..."
-	@if ! flyctl status >/dev/null 2>&1; then \
-		echo "First deployment - creating app and deploying..."; \
-		flyctl launch --copy-config --name {{.ProjectName}} --yes; \
+# Generate .env.local from example
+env: env-local
+	@echo "✓ Generated .env.local (gitignored)"
+
+# Generate .env.local for local development
+env-local:
+	@if [ ! -f .env.local.example ]; then \
+		echo "Error: .env.local.example not found"; \
+		exit 1; \
+	fi; \
+	if [ ! -f .env.local ]; then \
+		echo "Generating .env.local from .env.local.example with empty values..."; \
+		awk 'BEGIN {FS="="} /^[A-Z_]+=/ {print $$1"="; next} {print}' .env.local.example > .env.local; \
+		echo "✓ Generated .env.local (fill in your secrets)"; \
 	else \
-		echo "Deploying updates..."; \
-		flyctl deploy; \
+		echo ".env.local already exists, skipping..."; \
 	fi
 
+
+# Deploy to Fly.io
+deploy:
+	flyctl deploy -a {{.ProjectName}}
+
 # Deploy with local build (faster for development)
-deploy-local:{{- if .HasDynamoDB}} terraform{{- end}}{{- if .HasPostgres}} migrate-prod{{- end}}
-	@echo "Deploying to Fly.io with local build..."
-	@if ! flyctl status >/dev/null 2>&1; then \
-		echo "First deployment - creating app and deploying..."; \
-		flyctl launch --copy-config --name {{.ProjectName}} --yes --local-only; \
-	else \
-		echo "Deploying updates..."; \
-		flyctl deploy --local-only; \
-	fi
+deploy-local:
+	flyctl deploy -a {{.ProjectName}} --local-only
 
 # Destroy Fly.io app and infrastructure (permanent - deletes app and all resources)
 destroy:{{- if .HasDynamoDB}} terraform-destroy{{- end}}

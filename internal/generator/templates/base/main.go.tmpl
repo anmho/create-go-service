@@ -30,6 +30,22 @@ func main() {
 		log.Fatalln("failed to load config", err)
 	}
 
+	// Print loaded configuration
+	slog.Info("loaded configuration",
+		"stage", cfg.Server.Stage,
+		"port", cfg.Server.Port,
+		"database", cfg.Database,
+	{{- if .HasAuth}}
+		"auth", cfg.Auth,
+	{{- end}}
+	{{- if .HasMetrics}}
+		"metrics", cfg.Metrics,
+	{{- end}}
+	{{- if .HasPostHog}}
+		"posthog", cfg.PostHog,
+	{{- end}}
+	)
+
 {{- if .HasDynamoDB}}
 	// Initialize DynamoDB client
 	// Uses endpoint URL if provided (for local development), otherwise uses IAM roles on AWS infrastructure

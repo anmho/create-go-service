@@ -87,7 +87,18 @@ postctl version
 
 ### Configuration
 
-The service uses environment variables for configuration. See `.env.example` for available options.
+The service uses **YAML config files** as the source of truth for all non-sensitive configuration:
+
+- `local.yaml` - Local development settings
+- `production.yaml` - Production settings (embedded in Docker image)
+
+**Secrets** are loaded from environment variables only (see `.env.example`):
+- AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- Database URLs (`DATABASE_URL`)
+- JWT secrets (`JWT_SECRET`)
+- PostHog API keys (`POSTHOG_API_KEY`)
+
+The config file is selected via `STAGE` environment variable (defaults to "local") or `CONFIG_FILE` for explicit override.
 
 ### Monitoring
 

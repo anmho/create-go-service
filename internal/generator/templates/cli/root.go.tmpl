@@ -6,7 +6,6 @@ import (
 
 var (
 	// Global flags
-	configFile string
 	endpoint   string
 	userID     string
 )
@@ -25,7 +24,6 @@ func Execute() error {
 
 func init() {
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "config file (default is ./config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "http://localhost:8080", "API server endpoint")
 	rootCmd.PersistentFlags().StringVar(&userID, "user-id", "", "User ID for authentication")
 }

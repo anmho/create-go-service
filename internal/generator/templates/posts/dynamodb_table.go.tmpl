@@ -227,11 +227,30 @@ func CreateTableIfNotExists(ctx context.Context, client *dynamodb.Client, tableN
 }
 
 // NewPostTable creates a new DynamoDB repository for posts
-// It creates the table if it doesn't exist to ensure consistency with tests
+// It attempts to create the table if it doesn't exist using the AWS SDK (useful for local development and tests)
+// If table creation fails and the table doesn't exist, it logs the error and returns it
 func NewPostTable(ctx context.Context, client *dynamodb.Client, tableName string) (*PostTable, error) {
-	// Create table if it doesn't exist
-	if err := CreateTableIfNotExists(ctx, client, tableName); err != nil {
-		return nil, fmt.Errorf("failed to ensure table exists: %w", err)
+	// Try to create table if it doesn't exist
+	err := CreateTableIfNotExists(ctx, client, tableName)
+	if err != nil {
+		// Check if table exists despite creation failure
+		_, describeErr := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+			TableName: aws.String(tableName),
+		})
+		
+		if describeErr != nil {
+			// Table doesn't exist and we couldn't create it
+			slog.ErrorContext(ctx, "Table: failed to create table", 
+				"table_name", tableName, 
+				"error", err)
+			return nil, fmt.Errorf("failed to create table %s: %w", tableName, err)
+		}
+		
+		// Table exists, but creation failed (likely schema mismatch or permission issue)
+		// Log warning but continue - table exists so we can use it
+		slog.WarnContext(ctx, "Table creation failed but table exists - continuing", 
+			"table_name", tableName, 
+			"error", err)
 	}
 
 	return &PostTable{

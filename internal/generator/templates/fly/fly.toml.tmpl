@@ -22,15 +22,14 @@ primary_region = "iad"
   memory_mb = 256
 
 [env]
-  PORT = "8080"
+  # Stage selection (determines which YAML config file to load)
+  # Options: local, production (defaults to production)
   STAGE = "production"
-{{- if .HasDynamoDB}}
-  AWS_REGION = "us-east-1"
-  TABLE_NAME = "{{.ProjectName}}"
-  # Note: AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) must be set as secrets
-  # Run: fly secrets set AWS_ACCESS_KEY_ID=your-key AWS_SECRET_ACCESS_KEY=your-secret
-{{- end}}
-  # Note: gRPC reflection is automatically disabled in non-local stages
+  
+  # Note: All configuration values (ports, table names, regions, etc.) come from the YAML config file
+  # All config files (local.yaml, production.yaml) are bundled in the Docker image
+  # Secrets are read from .env file and set on Fly.io when running 'make deploy'
+  # Copy .env.example to .env and fill in your secrets before deploying
 
 [metrics]
   port = 8080  # Use same port as main service

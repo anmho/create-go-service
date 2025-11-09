@@ -40,6 +40,22 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	// Print loaded configuration
+	slog.Info("loaded configuration",
+		"stage", cfg.Server.Stage,
+		"port", cfg.Server.Port,
+		"database", cfg.Database,
+	{{- if .HasAuth}}
+		"auth", cfg.Auth,
+	{{- end}}
+	{{- if .HasMetrics}}
+		"metrics", cfg.Metrics,
+	{{- end}}
+	{{- if .HasPostHog}}
+		"posthog", cfg.PostHog,
+	{{- end}}
+	)
+
 	slog.Info("Starting gRPC server",
 		"stage", cfg.Server.Stage,
 		"port", cfg.Server.Port,

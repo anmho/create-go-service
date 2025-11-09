@@ -108,14 +108,8 @@ func (s *Server) registerHealthCheck() {
 	slog.Info("Registered gRPC health check", "path", path)
 }
 
-// registerReflection registers gRPC reflection for development
+// registerReflection registers gRPC reflection for all stages
 func (s *Server) registerReflection() {
-	// Enable reflection only in local stage
-	if !s.config.Server.Stage.IsLocal() {
-		slog.Info("gRPC reflection disabled", "stage", s.config.Server.Stage)
-		return
-	}
-
 	reflector := grpcreflect.NewStaticReflector(
 		postsv1connect.PostServiceName,
 	)
