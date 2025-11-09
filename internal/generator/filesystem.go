@@ -36,4 +36,3 @@ func (f *OSFileSystem) Stat(name string) (fs.FileInfo, error) {
 func (f *OSFileSystem) RemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
-

@@ -12,4 +12,3 @@ const (
 type Config struct {
 	Type Type
 }
-

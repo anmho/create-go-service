@@ -38,4 +38,3 @@ func main() {
 
 	fmt.Println("✓ Project generated successfully at:", cfg.OutputDir)
 }
-

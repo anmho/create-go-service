@@ -13,4 +13,3 @@ const (
 type Config struct {
 	Types []Type // API types to generate (chi, grpc, huma)
 }
-

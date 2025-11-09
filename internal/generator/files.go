@@ -32,4 +32,3 @@ func (g *Generator) generateFile(outputPath, templatePath string, data interface
 
 	return nil
 }
-

@@ -163,7 +163,7 @@ func TestGenerateFile(t *testing.T) {
 	t.Parallel()
 	mockFS := mocks.NewFileSystem(t)
 	mockLoader := NewMockTemplateLoader()
-	
+
 	// Create a simple template
 	tmpl := template.Must(template.New("test.tmpl").Parse("Hello {{.ProjectName}}"))
 	mockLoader.Templates["test.tmpl"] = tmpl
@@ -180,7 +180,7 @@ func TestGenerateFile(t *testing.T) {
 
 	expectedPath := filepath.Join("/tmp/test", "output.txt")
 	expectedContent := "Hello test-service"
-	
+
 	// Set up expectations
 	mockFS.On("MkdirAll", filepath.Dir(expectedPath), mock.Anything).Return(nil)
 	mockFS.On("WriteFile", expectedPath, []byte(expectedContent), mock.Anything).Return(nil)
@@ -223,7 +223,7 @@ func TestGenerateFileWriteError(t *testing.T) {
 	t.Parallel()
 	mockFS := mocks.NewFileSystem(t)
 	mockLoader := NewMockTemplateLoader()
-	
+
 	tmpl := template.Must(template.New("test.tmpl").Parse("test"))
 	mockLoader.Templates["test.tmpl"] = tmpl
 
@@ -251,85 +251,105 @@ func TestGenerateFileWriteError(t *testing.T) {
 	}
 }
 
-func TestGenerateBaseFiles(t *testing.T) {
-	t.Parallel()
-	mockFS := mocks.NewFileSystem(t)
-	mockLoader := NewMockTemplateLoader()
-	
-	// Create templates for base files
-	baseTemplates := []string{
-		"base/go.mod.tmpl",
-		"base/README.md.tmpl",
-		"base/.gitignore.tmpl",
-		"base/.dockerignore.tmpl",
-		"base/local.yaml.tmpl",
-		"base/development.yaml.tmpl",
-		"base/production.yaml.tmpl",
-		"makefile/Makefile.tmpl",
-	}
-	for _, tmplPath := range baseTemplates {
-		tmpl := template.Must(template.New(tmplPath).Parse("{{.ProjectName}}"))
-		mockLoader.Templates[tmplPath] = tmpl
-	}
-
-	config := config.ProjectConfig{
-		ProjectName: "test-service",
-		ModulePath:  "github.com/test/service",
-		OutputDir:   "/tmp/test",
-	}
-	gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
-
-	// Set up expectations for all base files
-	expectedFiles := []string{
-		"/tmp/test/go.mod",
-		"/tmp/test/README.md",
-		"/tmp/test/.gitignore",
-		"/tmp/test/.dockerignore",
-		"/tmp/test/local.yaml",
-		"/tmp/test/development.yaml",
-		"/tmp/test/production.yaml",
-		"/tmp/test/Makefile",
-	}
-
-	// MkdirAll will be called for each file's directory (all in /tmp/test)
-	mockFS.On("MkdirAll", "/tmp/test", mock.Anything).Return(nil).Times(len(expectedFiles))
-	for _, file := range expectedFiles {
-		mockFS.On("WriteFile", file, mock.Anything, mock.Anything).Return(nil)
-	}
-
-	err := gen.generateBaseFiles()
-	if err != nil {
-		t.Fatalf("generateBaseFiles failed: %v", err)
-	}
-
-	mockFS.AssertExpectations(t)
-}
-
-func TestGenerateAPIFiles(t *testing.T) {
+func TestGetFileGenerationRules(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		apiType      api.Type
+		name             string
+		config           config.ProjectConfig
+		expectedMinFiles int // Minimum number of files we expect
+	}{
+		{
+			name: "Chi with DynamoDB",
+			config: config.ProjectConfig{
+				ProjectName: "test-service",
+				ModulePath:  "github.com/test/service",
+				OutputDir:   "/tmp/test",
+				API: api.Config{
+					Types: []api.Type{api.TypeChi},
+				},
+				Database: database.Config{
+					Type: database.TypeDynamoDB,
+				},
+				Deployment: deployment.Config{
+					Type: deployment.TypeFly,
+				},
+			},
+			expectedMinFiles: 20, // Base files + config + dev + CLI + metrics + Chi + DynamoDB + posts + terraform
+		},
+		{
+			name: "gRPC with Postgres and Auth",
+			config: config.ProjectConfig{
+				ProjectName: "test-service",
+				ModulePath:  "github.com/test/service",
+				OutputDir:   "/tmp/test",
+				API: api.Config{
+					Types: []api.Type{api.TypeGRPC},
+				},
+				Database: database.Config{
+					Type: database.TypePostgres,
+				},
+				Deployment: deployment.Config{
+					Type: deployment.TypeFly,
+				},
+				Features: []config.Feature{config.FeatureAuth},
+			},
+			expectedMinFiles: 20, // Base files + config + dev + CLI + metrics + gRPC + Postgres + posts + atlas + auth
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockFS := mocks.NewFileSystem(t)
+			mockLoader := NewMockTemplateLoader()
+			gen := NewGeneratorWithDeps(tt.config, mockFS, mockLoader)
+
+			// Mock MkdirAll for .github/workflows (called by deployment condition)
+			mockFS.On("MkdirAll", filepath.Join("/tmp/test", ".github", "workflows"), mock.Anything).Return(nil)
+
+			rules := gen.getFileGenerationRules()
+
+			// Count total files
+			totalFiles := 0
+			for _, rule := range rules {
+				if rule.condition == nil || rule.condition(gen) {
+					totalFiles += len(rule.files)
+				}
+			}
+
+			if totalFiles < tt.expectedMinFiles {
+				t.Errorf("expected at least %d files, got %d", tt.expectedMinFiles, totalFiles)
+			}
+		})
+	}
+}
+
+func TestGenerateAPIFilesInRules(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		apiType       api.Type
 		expectedFiles []string
 	}{
 		{
 			name:    "Chi",
 			apiType: api.TypeChi,
 			expectedFiles: []string{
-				"/tmp/test/internal/api/server.go",
-				"/tmp/test/internal/json/json.go",
+				"internal/api/server.go",
+				"internal/json/json.go",
+				"internal/posts/handlers.go",
+				"cmd/api/main.go", // Only if not gRPC
 			},
 		},
 		{
 			name:    "gRPC",
 			apiType: api.TypeGRPC,
 			expectedFiles: []string{
-				"/tmp/test/internal/api/server.go",
-				"/tmp/test/internal/api/posts_handler.go",
-				"/tmp/test/protos/posts/v1/posts.proto",
-				"/tmp/test/buf.yaml",
-				"/tmp/test/buf.gen.yaml",
-				"/tmp/test/cmd/api/main.go",
+				"internal/api/server.go",
+				"internal/api/posts_handler.go",
+				"protos/posts/v1/posts.proto",
+				"buf.yaml",
+				"buf.gen.yaml",
+				"cmd/api/main.go",
 			},
 		},
 	}
@@ -338,23 +358,6 @@ func TestGenerateAPIFiles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFS := mocks.NewFileSystem(t)
 			mockLoader := NewMockTemplateLoader()
-			
-			// Create templates
-			templates := map[string]string{
-				"chi/server.go.tmpl":           "/tmp/test/internal/api/server.go",
-				"chi/json.go.tmpl":             "/tmp/test/internal/json/json.go",
-				"grpc/server.go.tmpl":          "/tmp/test/internal/api/server.go",
-				"grpc/posts_handler.go.tmpl":    "/tmp/test/internal/api/posts_handler.go",
-				"grpc/posts.proto.tmpl":         "/tmp/test/protos/posts/v1/posts.proto",
-				"grpc/buf.yaml.tmpl":            "/tmp/test/buf.yaml",
-				"grpc/buf.gen.yaml.tmpl":        "/tmp/test/buf.gen.yaml",
-				"grpc/main.go.tmpl":             "/tmp/test/cmd/api/main.go",
-			}
-			
-			for tmplPath := range templates {
-				tmpl := template.Must(template.New(tmplPath).Parse("{{.ProjectName}}"))
-				mockLoader.Templates[tmplPath] = tmpl
-			}
 
 			config := config.ProjectConfig{
 				ProjectName: "test-service",
@@ -372,35 +375,62 @@ func TestGenerateAPIFiles(t *testing.T) {
 			}
 			gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
 
-			// Set up expectations for all expected files
-			// MkdirAll will be called for each file's directory
-			for _, file := range tt.expectedFiles {
-				dir := filepath.Dir(file)
-				mockFS.On("MkdirAll", dir, mock.Anything).Return(nil)
-				mockFS.On("WriteFile", file, mock.Anything, mock.Anything).Return(nil)
+			// Mock MkdirAll for .github/workflows (called by deployment condition)
+			mockFS.On("MkdirAll", filepath.Join("/tmp/test", ".github", "workflows"), mock.Anything).Return(nil)
+
+			rules := gen.getFileGenerationRules()
+
+			// Find API-related files in rules
+			foundFiles := make(map[string]bool)
+			for _, rule := range rules {
+				if rule.condition == nil || rule.condition(gen) {
+					for _, file := range rule.files {
+						foundFiles[file.outputPath] = true
+					}
+				}
 			}
 
-			err := gen.generateAPIFiles(tt.apiType)
-			if err != nil {
-				t.Fatalf("generateAPIFiles failed: %v", err)
+			// Check that expected files are present
+			for _, expectedFile := range tt.expectedFiles {
+				if !foundFiles[expectedFile] {
+					t.Errorf("expected file %s not found in generation rules", expectedFile)
+				}
 			}
-
-			mockFS.AssertExpectations(t)
 		})
 	}
 }
 
-func TestGenerateDatabaseFiles(t *testing.T) {
+func TestGenerateDatabaseFilesInRules(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		database     database.Type
-		expectedFile string
+		name          string
+		database      database.Type
+		expectedFiles []string
 	}{
 		{
-			name:         "DynamoDB",
-			database:      database.TypeDynamoDB,
-			expectedFile: "/tmp/test/internal/database/dynamodb.go",
+			name:     "DynamoDB",
+			database: database.TypeDynamoDB,
+			expectedFiles: []string{
+				"internal/database/dynamodb.go",
+				"internal/posts/dynamodb_table.go",
+				"internal/posts/post_table_test.go",
+				"terraform/main.tf",
+				"terraform/variables.tf",
+				"terraform/.gitignore",
+				"terraform/README.md",
+			},
+		},
+		{
+			name:     "Postgres",
+			database: database.TypePostgres,
+			expectedFiles: []string{
+				"internal/database/postgres.go",
+				"internal/posts/postgres_table.go",
+				"internal/posts/post_table_test.go",
+				"atlas.hcl",
+				"migrations/001_initial.up.sql",
+				"migrations/001_initial.down.sql",
+			},
 		},
 	}
 
@@ -408,14 +438,6 @@ func TestGenerateDatabaseFiles(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFS := mocks.NewFileSystem(t)
 			mockLoader := NewMockTemplateLoader()
-			
-			tmplPath := "dynamodb/dynamodb.go.tmpl"
-			if tt.database == database.TypeDynamoDB {
-				tmplPath = "postgres/postgres.go.tmpl"
-			}
-			
-			tmpl := template.Must(template.New(tmplPath).Parse("{{.ProjectName}}"))
-			mockLoader.Templates[tmplPath] = tmpl
 
 			config := config.ProjectConfig{
 				ProjectName: "test-service",
@@ -433,37 +455,35 @@ func TestGenerateDatabaseFiles(t *testing.T) {
 			}
 			gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
 
-			dir := filepath.Dir(tt.expectedFile)
-			mockFS.On("MkdirAll", dir, mock.Anything).Return(nil)
-			mockFS.On("WriteFile", tt.expectedFile, mock.Anything, mock.Anything).Return(nil)
+			// Mock MkdirAll for .github/workflows (called by deployment condition)
+			mockFS.On("MkdirAll", filepath.Join("/tmp/test", ".github", "workflows"), mock.Anything).Return(nil)
 
-			err := gen.generateDatabaseFiles()
-			if err != nil {
-				t.Fatalf("generateDatabaseFiles failed: %v", err)
+			rules := gen.getFileGenerationRules()
+
+			// Find database-related files in rules
+			foundFiles := make(map[string]bool)
+			for _, rule := range rules {
+				if rule.condition == nil || rule.condition(gen) {
+					for _, file := range rule.files {
+						foundFiles[file.outputPath] = true
+					}
+				}
 			}
 
-			mockFS.AssertExpectations(t)
+			// Check that expected files are present
+			for _, expectedFile := range tt.expectedFiles {
+				if !foundFiles[expectedFile] {
+					t.Errorf("expected file %s not found in generation rules", expectedFile)
+				}
+			}
 		})
 	}
 }
 
-func TestGeneratePostsFiles(t *testing.T) {
+func TestGeneratePostsFilesInRules(t *testing.T) {
 	t.Parallel()
 	mockFS := mocks.NewFileSystem(t)
 	mockLoader := NewMockTemplateLoader()
-	
-	// Create templates
-	templates := []string{
-		"posts/post.go.tmpl",
-		"posts/service.go.tmpl",
-		"posts/dynamodb_table.go.tmpl",
-		"posts/dynamodb_table_test.go.tmpl",
-		"posts/handlers.go.tmpl",
-	}
-	for _, tmplPath := range templates {
-		tmpl := template.Must(template.New(tmplPath).Parse("{{.ProjectName}}"))
-		mockLoader.Templates[tmplPath] = tmpl
-	}
 
 	config := config.ProjectConfig{
 		ProjectName: "test-service",
@@ -481,74 +501,152 @@ func TestGeneratePostsFiles(t *testing.T) {
 	}
 	gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
 
-	// Set up expectations for all expected files
+	// Mock MkdirAll for .github/workflows (called by deployment condition)
+	mockFS.On("MkdirAll", filepath.Join("/tmp/test", ".github", "workflows"), mock.Anything).Return(nil)
+
+	rules := gen.getFileGenerationRules()
+
+	// Find posts-related files in rules
+	foundFiles := make(map[string]bool)
+	for _, rule := range rules {
+		if rule.condition == nil || rule.condition(gen) {
+			for _, file := range rule.files {
+				if filepath.Dir(file.outputPath) == "internal/posts" || filepath.Base(file.outputPath) == "handlers.go" {
+					foundFiles[file.outputPath] = true
+				}
+			}
+		}
+	}
+
+	// Check that expected posts files are present
 	expectedFiles := []string{
-		"/tmp/test/internal/posts/post.go",
-		"/tmp/test/internal/posts/service.go",
-		"/tmp/test/internal/posts/dynamodb_table.go",
-		"/tmp/test/internal/posts/post_table_test.go",
-		"/tmp/test/internal/posts/handlers.go",
+		"internal/posts/post.go",
+		"internal/posts/service.go",
+		"internal/posts/converters.go",
+		"internal/posts/converters_test.go",
+		"internal/posts/dynamodb_table.go",
+		"internal/posts/post_table_test.go",
+		"internal/posts/handlers.go",
 	}
 
-	for _, file := range expectedFiles {
-		dir := filepath.Dir(file)
-		mockFS.On("MkdirAll", dir, mock.Anything).Return(nil)
-		mockFS.On("WriteFile", file, mock.Anything, mock.Anything).Return(nil)
+	for _, expectedFile := range expectedFiles {
+		if !foundFiles[expectedFile] {
+			t.Errorf("expected file %s not found in generation rules", expectedFile)
+		}
 	}
-
-	err := gen.generatePostsFiles()
-	if err != nil {
-		t.Fatalf("generatePostsFiles failed: %v", err)
-	}
-
-	mockFS.AssertExpectations(t)
 }
 
-func TestGenerateFeatureFiles(t *testing.T) {
+func TestGenerateFeatureFilesInRules(t *testing.T) {
 	t.Parallel()
-	mockFS := mocks.NewFileSystem(t)
-	mockLoader := NewMockTemplateLoader()
-	
-	// Create templates
-	metricsTmpl := template.Must(template.New("metrics/metrics.go.tmpl").Parse("{{.ProjectName}}"))
-	mockLoader.Templates["metrics/metrics.go.tmpl"] = metricsTmpl
-	
-	posthogTmpl := template.Must(template.New("posthog/posthog.go.tmpl").Parse("{{.ProjectName}}"))
-	mockLoader.Templates["posthog/posthog.go.tmpl"] = posthogTmpl
-	
-	authTmpl := template.Must(template.New("auth/jwt.go.tmpl").Parse("{{.ProjectName}}"))
-	mockLoader.Templates["auth/jwt.go.tmpl"] = authTmpl
-
-	config := config.ProjectConfig{
-		ProjectName: "test-service",
-		ModulePath:  "github.com/test/service",
-		OutputDir:   "/tmp/test",
-		Features:    []config.Feature{config.FeatureAuth},
-		API: api.Config{
-			Types: []api.Type{api.TypeChi},
+	tests := []struct {
+		name          string
+		features      []config.Feature
+		expectedFiles []string
+	}{
+		{
+			name:     "Auth feature",
+			features: []config.Feature{config.FeatureAuth},
+			expectedFiles: []string{
+				"internal/metrics/metrics.go", // Always generated
+				"internal/auth/jwt.go",
+			},
 		},
-		Database: database.Config{
-			Type: database.TypeDynamoDB,
+		{
+			name:     "PostHog feature",
+			features: []config.Feature{config.FeaturePostHog},
+			expectedFiles: []string{
+				"internal/metrics/metrics.go", // Always generated
+				"internal/posthog/posthog.go",
+			},
 		},
-		Deployment: deployment.Config{
-			Type: deployment.TypeFly,
+		{
+			name:     "Both features",
+			features: []config.Feature{config.FeatureAuth, config.FeaturePostHog},
+			expectedFiles: []string{
+				"internal/metrics/metrics.go", // Always generated
+				"internal/auth/jwt.go",
+				"internal/posthog/posthog.go",
+			},
+		},
+		{
+			name:     "No features",
+			features: []config.Feature{},
+			expectedFiles: []string{
+				"internal/metrics/metrics.go", // Always generated
+			},
 		},
 	}
-	gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
 
-	// Set up expectations
-	// Metrics is always generated
-	mockFS.On("MkdirAll", "/tmp/test/internal/metrics", mock.Anything).Return(nil)
-	mockFS.On("WriteFile", "/tmp/test/internal/metrics/metrics.go", mock.Anything, mock.Anything).Return(nil)
-	// Auth is generated when FeatureAuth is enabled
-	mockFS.On("MkdirAll", "/tmp/test/internal/auth", mock.Anything).Return(nil)
-	mockFS.On("WriteFile", "/tmp/test/internal/auth/jwt.go", mock.Anything, mock.Anything).Return(nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockFS := mocks.NewFileSystem(t)
+			mockLoader := NewMockTemplateLoader()
 
-	err := gen.generateFeatureFiles()
-	if err != nil {
-		t.Fatalf("generateFeatureFiles failed: %v", err)
+			config := config.ProjectConfig{
+				ProjectName: "test-service",
+				ModulePath:  "github.com/test/service",
+				OutputDir:   "/tmp/test",
+				Features:    tt.features,
+				API: api.Config{
+					Types: []api.Type{api.TypeChi},
+				},
+				Database: database.Config{
+					Type: database.TypeDynamoDB,
+				},
+				Deployment: deployment.Config{
+					Type: deployment.TypeFly,
+				},
+			}
+			gen := NewGeneratorWithDeps(config, mockFS, mockLoader)
+
+			// Mock MkdirAll for .github/workflows (called by deployment condition)
+			mockFS.On("MkdirAll", filepath.Join("/tmp/test", ".github", "workflows"), mock.Anything).Return(nil)
+
+			rules := gen.getFileGenerationRules()
+
+			// Find feature-related files in rules
+			foundFiles := make(map[string]bool)
+			for _, rule := range rules {
+				if rule.condition == nil || rule.condition(gen) {
+					for _, file := range rule.files {
+						if filepath.Dir(file.outputPath) == "internal/metrics" ||
+							filepath.Dir(file.outputPath) == "internal/auth" ||
+							filepath.Dir(file.outputPath) == "internal/posthog" {
+							foundFiles[file.outputPath] = true
+						}
+					}
+				}
+			}
+
+			// Check that expected files are present
+			for _, expectedFile := range tt.expectedFiles {
+				if !foundFiles[expectedFile] {
+					t.Errorf("expected file %s not found in generation rules", expectedFile)
+				}
+			}
+
+			// Check that unexpected files are not present
+			allFeatureFiles := []string{
+				"internal/metrics/metrics.go",
+				"internal/auth/jwt.go",
+				"internal/posthog/posthog.go",
+			}
+			for _, file := range allFeatureFiles {
+				shouldExist := false
+				for _, expected := range tt.expectedFiles {
+					if expected == file {
+						shouldExist = true
+						break
+					}
+				}
+				if foundFiles[file] != shouldExist {
+					if shouldExist {
+						t.Errorf("expected file %s to exist but it doesn't", file)
+					} else {
+						t.Errorf("unexpected file %s found in generation rules", file)
+					}
+				}
+			}
+		})
 	}
-
-	mockFS.AssertExpectations(t)
 }
-

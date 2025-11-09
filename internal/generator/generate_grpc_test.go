@@ -38,4 +38,3 @@ func main() {
 
 	fmt.Println("✓ gRPC project generated successfully at:", cfg.OutputDir)
 }
-

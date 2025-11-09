@@ -61,4 +61,3 @@ func (m *MockTemplateLoader) LoadTemplate(path string) (*template.Template, erro
 	m.Templates[path] = tmpl
 	return tmpl, nil
 }
-
